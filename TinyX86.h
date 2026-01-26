@@ -47,7 +47,7 @@ typedef struct {
 			DWORD IOPL : 2;
 			DWORD NT : 1;
 			DWORD : 15;
-		} Bits;
+		};
 	} EFLAGS;
 	//段寄存器
 	union {
@@ -87,3 +87,37 @@ uint32_t GetOperandValue(CPU_Context* ctx, DecodeContext* d_ctx, int op_idx);
 void SetOperandValue(CPU_Context* ctx, DecodeContext* d_ctx, int op_idx, uint32_t value);
 // 处理 MOV r32, imm32 (0xB8 - 0xBF)
 void Exec_MOV_Reg_Imm(CPU_Context* ctx, DecodeContext* d_ctx);
+
+// 定义操作类型，用于标志位计算
+typedef enum {
+	ALU_ADD,
+	ALU_OR,
+	ALU_ADC,
+	ALU_SBB,
+	ALU_AND,
+	ALU_SUB,
+	ALU_XOR,
+	ALU_CMP
+} ALU_Op;
+// 计算奇偶性 (Parity Flag) - 仅检查低8位
+// Intel 手册规定的硬件行为：无论你进行的是 8 位、16 位、32 位还是 64 位运算，奇偶校验位（PF）始终只关注结果的最低 8 位（LSB）。
+int CalcPF(uint8_t res);
+// 核心：根据运算结果和操作数更新 EFLAGS
+// res: 运算结果
+// dest: 目的操作数 (运算前的值)
+// src: 源操作数
+// size: 操作数大小 (8, 16, 32)
+// op: 运算类型
+//目前实现了ADD和SUB的EFLAGS更新，其他的可以参考着实现
+void UpdateEFLAGS(CPU_Context* ctx, uint32_t res, uint32_t dest, uint32_t src, int size, ALU_Op op);
+
+//为了避免给 ADD、SUB、CMP 各写一个函数，我们实现一个通用的 ALU 执行函数。
+// 通用算术逻辑执行函数
+// op_code: 具体的 ALU 操作码枚举 (ADD, SUB, AND...)
+// is_compare: 如果为 true (如 CMP, TEST)，不写回结果
+void Exec_ALU_Generic(CPU_Context* ctx, DecodeContext* d_ctx, ALU_Op op, bool is_compare);
+// 辅助函数：获取操作数的实际位宽 (8, 16, 32)
+// 用于确保 ALU 标志位计算正确
+int GetOperandBitSize(CPU_Context* ctx, DecodeContext* d_ctx, OperandType type);
+// 处理 Group 1 指令 (0x80-0x83: ADD/OR/ADC/SBB/AND/SUB/XOR/CMP immediate)
+void Exec_Group1(CPU_Context* ctx, DecodeContext* d_ctx);

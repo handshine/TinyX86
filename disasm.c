@@ -1369,6 +1369,12 @@ int ParseInstuction(uint8_t* buffer, uint32_t eip, DecodeContext* out_ctx) {
         }
     }
 
+    // 将解析出的最终 mnemonic 和 operand 更新回 context
+    out_ctx->entry.mnemonic = mnemonic;
+    out_ctx->entry.op1 = op1;
+    out_ctx->entry.op2 = op2;
+    out_ctx->entry.op3 = op3;
+
     // 7. 解析立即数
     int imm_parse_idx = 0; //根据传入的索引（0 或 1），决定将读取到的值写入 ctx->imm 还是 ctx->imm2。
     if (IsImmediate(op1)) ParseImmediate(out_ctx, op1, imm_parse_idx++);
