@@ -134,6 +134,7 @@ typedef struct {
     int pos;
     bool mode64;
     uint32_t eip; // 当前指令的 EIP (用于计算相对跳转的绝对地址)
+    int instr_len;// 指令总长度
 
     // 前缀状态
 	bool pfx_lock;//0xF0

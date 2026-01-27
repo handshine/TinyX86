@@ -64,8 +64,10 @@ typedef struct {
 
 }CPU_Context;
 
-// 前置声明：执行分发函数 (将在任务2中实现)
-void ExecuteInstruction(CPU_Context* ctx, DecodeContext* d_ctx);
+// 修改 ExecuteInstruction 返回 bool
+// 返回 true: 表示指令发生了跳转 (EIP 已被修改)，调用者不需要再加 instr_len
+// 返回 false: 普通指令，调用者需要执行 EIP += instr_len
+bool ExecuteInstruction(CPU_Context* ctx, DecodeContext* d_ctx);
 
 void Exec_NOP(CPU_Context* ctx);
 
@@ -121,3 +123,21 @@ void Exec_ALU_Generic(CPU_Context* ctx, DecodeContext* d_ctx, ALU_Op op, bool is
 int GetOperandBitSize(CPU_Context* ctx, DecodeContext* d_ctx, OperandType type);
 // 处理 Group 1 指令 (0x80-0x83: ADD/OR/ADC/SBB/AND/SUB/XOR/CMP immediate)
 void Exec_Group1(CPU_Context* ctx, DecodeContext* d_ctx);
+// PUSH r32 / imm32 / imm8
+void Exec_PUSH(CPU_Context* ctx, DecodeContext* d_ctx);
+// POP r32
+void Exec_POP(CPU_Context* ctx, DecodeContext* d_ctx);
+// 检查条件跳转是否成立 (Jcc)
+// condition_code: 指令 Opcode 的低 4 位 (0x70-0x7F 或 0x80-0x8F 的低位)
+bool CheckCondition(CPU_Context* ctx, uint8_t condition_code);
+// 处理相对跳转 (JMP, Jcc, CALL)
+// 返回 true 表示跳转发生
+bool Exec_Branch(CPU_Context* ctx, DecodeContext* d_ctx, bool is_conditional);
+// 处理 CALL (相对调用)
+bool Exec_CALL(CPU_Context* ctx, DecodeContext* d_ctx);
+// 处理 RET与带参数 (返回)
+bool Exec_RET(CPU_Context* ctx, DecodeContext* d_ctx);
+//处理DEC
+void Exec_DEC(CPU_Context* ctx, DecodeContext* d_ctx);
+//处理INC
+void Exec_INC(CPU_Context* ctx, DecodeContext* d_ctx);

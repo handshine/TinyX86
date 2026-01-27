@@ -1380,7 +1380,7 @@ int ParseInstuction(uint8_t* buffer, uint32_t eip, DecodeContext* out_ctx) {
     if (IsImmediate(op1)) ParseImmediate(out_ctx, op1, imm_parse_idx++);
     if (IsImmediate(op2)) ParseImmediate(out_ctx, op2, imm_parse_idx++);
     if (IsImmediate(op3)) ParseImmediate(out_ctx, op3, imm_parse_idx++);
-
+	out_ctx->instr_len = out_ctx->pos;
     return out_ctx->pos;
 }
 

@@ -1,88 +1,125 @@
 #include "TinyX86.h"
 #include <stdio.h>
+#include <string.h>
 
-static void run_steps(CPU_Context* ctx, int steps, const char* title)
-{
-    printf("\n== %s ==\n", title);
-    for (int i = 0; i < steps; i++) {
-        runcpu(ctx, 1);
-        printf("第%d步: EAX=0x%08X ZF=%d SF=%d CF=%d OF=%d AF=%d PF=%d\n\n",
-            i + 1,
-            ctx->GPR[0].I32,
-            ctx->EFLAGS.ZF,
-            ctx->EFLAGS.SF,
-            ctx->EFLAGS.CF,
-            ctx->EFLAGS.OF,
-            ctx->EFLAGS.AF,
-            ctx->EFLAGS.PF);
-    }
+// 用于打印当前机器码的辅助函数
+void PrintTrace(CPU_Context* ctx, int step_count) {
+    // 简单读取一下当前指令的第一个字节作为参考
+    uint8_t opcode = *(uint8_t*)ctx->EIP;
+    printf("[Step %2d] EIP=0x%08X | Opcode=0x%02X | EAX=0x%08X | ECX=0x%08X | ESP=0x%08X\n",
+        step_count, ctx->EIP, opcode, ctx->GPR[0].I32, ctx->GPR[1].I32, ctx->ESP.I32);
 }
 
+uint8_t stack_mem[1024];
+
 int main() {
-    // 机器码序列：
-    // 1. B8 10 00 00 00    MOV EAX, 0x10
-    // 2. 83 C0 20          ADD EAX, 0x20  -> EAX=0x30, ZF=0
-    // 3. 83 E8 30          SUB EAX, 0x30  -> EAX=0x00, ZF=1
-    // 4. 83 F8 00          CMP EAX, 0      -> ZF=1
-    // 5. B8 FF FF FF 7F    MOV EAX, 0x7FFFFFFF
-    // 6. 83 C0 01          ADD EAX, 1      -> EAX=0x80000000, OF=1, SF=1
-    // 7. B8 00 00 00 80    MOV EAX, 0x80000000
-    // 8. 83 E8 01          SUB EAX, 1      -> EAX=0x7FFFFFFF, OF=1
-    // 9. B8 00 00 00 00    MOV EAX, 0
-    // 10. 83 E8 01         SUB EAX, 1      -> EAX=0xFFFFFFFF, CF=1, SF=1
-    // 11. 83 C0 01         ADD EAX, 1      -> EAX=0x00000000, CF=1, ZF=1
-    // 12. 83 E0 0F         AND EAX, 0x0F   -> EAX=0, ZF=1
-    // 13. 83 F0 FF         XOR EAX, 0xFF   -> EAX=0x000000FF, ZF=0
+    // ---------------------------------------------------------
+    // 测试场景：函数调用与栈操作
+    // 伪代码逻辑：
+    //    EAX = 10;
+    //    func_double(); // EAX = EAX + EAX
+    //    if (EAX == 20) goto Success;
+    //    EAX = -1; (Failure)
+    //    return;
+    // Success:
+    //    NOP;
+    // ---------------------------------------------------------
+
     uint8_t code[] = {
-        0xB8, 0x10, 0x00, 0x00, 0x00,
-        0x83, 0xC0, 0x20,
-        0x83, 0xE8, 0x30,
+        // --- 主程序 Main ---
+        // Offset 0: MOV EAX, 10
+        0xB8, 0x0A, 0x00, 0x00, 0x00,
 
-        0x83, 0xF8, 0x00,
+        // Offset 5: CALL +12 (跳转到 Offset 22: 子函数)
+        // 机器码 E8 rel32。计算：Target(22) - NextIP(10) = 12 (0x0C)
+        0xE8, 0x0C, 0x00, 0x00, 0x00,
 
-        0xB8, 0xFF, 0xFF, 0xFF, 0x7F,
-        0x83, 0xC0, 0x01,
+        // Offset 10: CMP EAX, 20 (检查返回值是否为 20)
+        // 83 F8 14 (CMP EAX, byte 20)
+        0x83, 0xF8, 0x14,
 
-        0xB8, 0x00, 0x00, 0x00, 0x80,
-        0x83, 0xE8, 0x01,
+        // Offset 13: JZ +6 (如果你实现了 JZ，且 ZF=1，跳转到 Offset 21)
+        // 74 06 (NextIP=15, 15+6=21)
+        0x74, 0x06,
 
-        0xB8, 0x00, 0x00, 0x00, 0x00,
-        0x83, 0xE8, 0x01,
-        0x83, 0xC0, 0x01,
+        // Offset 15: MOV EAX, 0xFFFFFFFF (失败标志)
+        0xB8, 0xFF, 0xFF, 0xFF, 0xFF,
 
-        0x83, 0xE0, 0x0F,
-        0x83, 0xF0, 0xFF
+        // Offset 20: NOP (失败终点)
+        0x90,
+
+        // Offset 21: NOP (成功终点，JZ 的目标)
+        0x90,
+
+        // --- 子函数 Subroutine (Offset 22) ---
+        // Offset 22: PUSH EAX (测试压栈，保存现场)
+        0x50,
+
+        // Offset 23: POP ECX  (测试出栈，把 EAX 的值弹给 ECX，顺便验证数据传输)
+        // 此时 ECX 应该等于 10
+        0x59,
+
+        // Offset 24: ADD EAX, ECX (EAX = 10 + 10 = 20)
+        // 01 C8 (ADD EAX, ECX)
+        0x01, 0xC8,
+
+        // Offset 26: RET (返回主程序 Offset 10)
+        0xC3
     };
 
+    // 1. 初始化上下文
     CPU_Context ctx;
     memset(&ctx, 0, sizeof(ctx));
+
+    // 2. 映射代码内存 (Host-Passthrough)
     ctx.EIP = (DWORD)code;
 
-    printf("Sprint 3 测试：ALU 与标志位（不使用反汇编输出）\n");
+    // 3. 初始化栈 (关键！)
+    // 模拟器直接读写内存，已在全局变量区开辟一段真实内存栈
+    // ESP 指向栈底（高地址），向下增长
+    ctx.ESP.I32 = (DWORD)(stack_mem + 1024);
+    uint32_t initial_esp = ctx.ESP.I32;
 
-    run_steps(&ctx, 3, "基础：MOV/ADD/SUB -> ZF");
-    if (ctx.GPR[0].I32 == 0 && ctx.EFLAGS.ZF == 1) {
-        printf("成功：SUB 结果为 0，且 ZF=1。\n");
+    printf("=== Start Simulation (Call/Ret/Stack Test) ===\n");
+    printf("Code Base: 0x%08X | Stack Base: 0x%08X\n", (DWORD)code, initial_esp);
+
+    // 4. 单步执行循环
+    // 这里的指令大约需要 8-9 步执行完
+    int max_steps = 15;
+    for (int i = 1; i <= max_steps; i++) {
+        PrintTrace(&ctx, i);
+
+        // 执行一步
+        int ret = runcpu(&ctx, 1);
+
+        if (ret != 0) {
+            printf("Runtime Error!\n");
+            break;
+        }
+
+        // 检查是否到达成功终点 (Offset 21)
+        if (ctx.EIP == (DWORD)code + 21) {
+            printf("\n[SUCCESS] Reached Success Label at Offset 21!\n");
+            break;
+        }
+
+        // 检查是否到达失败终点 (Offset 20)
+        if (ctx.EIP == (DWORD)code + 20) {
+            printf("\n[FAILURE] Reached Failure Label. EAX = %d\n", ctx.GPR[0].I32);
+            break;
+        }
     }
-    else {
-        printf("失败：0/ZF 校验未通过。EAX=0x%08X ZF=%d\n", ctx.GPR[0].I32, ctx.EFLAGS.ZF);
-    }
 
-    run_steps(&ctx, 1, "CMP EAX,0（不改 EAX，只影响标志位）");
-    if (ctx.EFLAGS.ZF == 1) {
-        printf("成功：CMP 设置了 ZF=1。\n");
-    }
-    else {
-        printf("失败：CMP 的 ZF 期望为 1，实际为 %d\n", ctx.EFLAGS.ZF);
-    }
+    // 5. 最终状态验证
+    printf("\n=== Final State Verification ===\n");
+    printf("1. EAX Check: %s (Expected: 20, Actual: %d)\n",
+        (ctx.GPR[0].I32 == 20) ? "PASS" : "FAIL", ctx.GPR[0].I32);
 
-    run_steps(&ctx, 2, "ADD 溢出测试（0x7FFFFFFF + 1）");
+    printf("2. ECX Check: %s (Expected: 10, Actual: %d)\n",
+        (ctx.GPR[1].I32 == 10) ? "PASS" : "FAIL", ctx.GPR[1].I32);
 
-    run_steps(&ctx, 2, "SUB 溢出测试（0x80000000 - 1）");
-
-    run_steps(&ctx, 3, "借位/进位链：0 - 1；再 +1");
-
-    run_steps(&ctx, 2, "逻辑运算：AND/XOR");
+    printf("3. Stack Balance: %s (ESP Should be Initial Value)\n",
+        (ctx.ESP.I32 == initial_esp) ? "PASS" : "FAIL");
 
     return 0;
 }

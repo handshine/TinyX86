@@ -19,38 +19,31 @@ int runcpu(CPU_Context* p, int step)
 			return -1;
 		}
 		// 2. 执行指令 (Execute)
-		ExecuteInstruction(p, &d_ctx);
+		// 传递 instr_len 给执行函数，因为 JMP 需要基于 (EIP + len) 计算跳转目标
+		bool jumped = ExecuteInstruction(p, &d_ctx);
 		// 3. 更新 EIP 指向下一条指令
-		p->EIP += instr_len;
+		// 仅当没有发生跳转时，才推进 EIP
+		if (!jumped) p->EIP += instr_len;
 		// 调试打印 (可选，用于观察 Sprint 1 效果)
-		printf("[Trace] EIP=0x%08X | Instr: %s | Len: %d\n", p->EIP, d_ctx.asm_str, instr_len);
+		printf("[Trace] EIP=0x%08X | Instr: %s | Len: %d\n\n", p->EIP, d_ctx.asm_str, instr_len);
 
 	}
-
 	return 0;
 }
 
 
 // 执行分发器
-void ExecuteInstruction(CPU_Context* ctx, DecodeContext* d_ctx) {
+bool ExecuteInstruction(CPU_Context* ctx, DecodeContext* d_ctx) {
+	// 默认不跳转
+	bool jumped = false;
 	switch (d_ctx->opcode) {
-		case 0x90: break; // NOP
-
-			// MOV (上一轮实现的)
-		case 0x88: case 0x89: case 0x8A: case 0x8B:
-		case 0xB8: case 0xB9: case 0xBA: case 0xBB:
-		case 0xBC: case 0xBD: case 0xBE: case 0xBF:
-		case 0xC6: case 0xC7: 
-			Exec_MOV_Reg_Imm(ctx, d_ctx); break;// 建议改名为更通用的 Exec_MOV
-			
-
-			// --- Sprint 3 新增 ---
-			// Group 1 (立即数运算)
+		// --- Sprint 3 新增 ---
+		// Group 1 (立即数运算)
 		case 0x80: case 0x81: case 0x83:
-			Exec_Group1(ctx, d_ctx);break;
+			Exec_Group1(ctx, d_ctx); break;
 			// 标准 ADD (Gv, Ev 等)
 		case 0x00: case 0x01: case 0x02: case 0x03: case 0x04: case 0x05:
-			Exec_ALU_Generic(ctx, d_ctx, ALU_ADD, false);break;
+			Exec_ALU_Generic(ctx, d_ctx, ALU_ADD, false); break;
 			//标准 OR
 		case 0x08: case 0x09: case 0x0A: case 0x0B: case 0x0C: case 0x0D:
 			Exec_ALU_Generic(ctx, d_ctx, ALU_OR, false); break;
@@ -65,15 +58,74 @@ void ExecuteInstruction(CPU_Context* ctx, DecodeContext* d_ctx) {
 			Exec_ALU_Generic(ctx, d_ctx, ALU_AND, false); break;
 			// 标准 SUB
 		case 0x28: case 0x29: case 0x2A: case 0x2B: case 0x2C: case 0x2D:
-			Exec_ALU_Generic(ctx, d_ctx, ALU_SUB, false);break;
+			Exec_ALU_Generic(ctx, d_ctx, ALU_SUB, false); break;
 			// 标准 CMP
 		case 0x38: case 0x39: case 0x3A: case 0x3B: case 0x3C: case 0x3D:
 			Exec_ALU_Generic(ctx, d_ctx, ALU_CMP, true); break;
+		// --- INC / DEC ---
+		case 0x40: case 0x41: case 0x42: case 0x43: case 0x44: case 0x45: case 0x46: case 0x47:
+			Exec_INC(ctx, d_ctx); break;
+		case 0x48: case 0x49: case 0x4A: case 0x4B: case 0x4C: case 0x4D: case 0x4E: case 0x4F:
+			Exec_DEC(ctx, d_ctx);break;
+
+		// --- PUSH / POP ---
+		case 0x50: case 0x51: case 0x52: case 0x53: case 0x54: case 0x55: case 0x56: case 0x57: // PUSH r32
+		case 0x68: case 0x6A: // PUSH imm
+		case 0x06: case 0x0E: case 0x16: case 0x1E: // PUSH Seg
+			Exec_PUSH(ctx, d_ctx);
+			break;
+		case 0x58: case 0x59: case 0x5A: case 0x5B: case 0x5C: case 0x5D: case 0x5E: case 0x5F: // POP r32
+		case 0x07: case 0x1F: // POP Seg
+			Exec_POP(ctx, d_ctx);
+			break;
+
+			// --- JMP / CALL / RET ---
+		case 0xE9: // JMP Jz (Near Jump 32)
+		case 0xEB: // JMP Jb (Short Jump 8)
+			jumped = Exec_Branch(ctx, d_ctx, false);
+			break;
+
+		case 0xE8: // CALL Jz
+			jumped = Exec_CALL(ctx, d_ctx);
+			break;
+
+		case 0xC3: // RETN
+		case 0xC2: // RETN Iw
+			jumped = Exec_RET(ctx, d_ctx);
+			break;
+
+			// --- Jcc (条件跳转) ---
+			// 0x70 - 0x7F (Short Jumps)
+		case 0x70: case 0x71: case 0x72: case 0x73:
+		case 0x74: case 0x75: case 0x76: case 0x77:
+		case 0x78: case 0x79: case 0x7A: case 0x7B:
+		case 0x7C: case 0x7D: case 0x7E: case 0x7F:
+			jumped = Exec_Branch(ctx, d_ctx, true);
+			break;
+
+			// 0x0F 8x (Long Jumps) - 属于 Opcode 扩展，注意 disasm 是否处理了 two_byte_opcode
+			// 如果是双字节码，switch(d_ctx->opcode) 可能只拿到了 0x8x (取决于你的 disasm 实现)
+			// 根据你的 disasm.c 逻辑，is_two_byte_opcode 会被设置。
+			// 如果 d_ctx->is_two_byte_opcode 为真，你需要在这里特判或者用两张 switch 表。
+			// Sprint 4 简化起见，先假设我们只处理 0x7x 系列短跳转。
+
+		case 0x90: break; // NOP
+
+			// MOV (上一轮实现的)
+		case 0x88: case 0x89: case 0x8A: case 0x8B:
+		case 0xB8: case 0xB9: case 0xBA: case 0xBB:
+		case 0xBC: case 0xBD: case 0xBE: case 0xBF:
+		case 0xC6: case 0xC7: 
+			Exec_MOV_Reg_Imm(ctx, d_ctx); break;// 建议改名为更通用的 Exec_MOV
+			
+
+
 
 		default:
 			printf("Unimplemented: 0x%02X\n", d_ctx->opcode);
 			break;
 	}
+	return jumped;
 }
 
 uint32_t ReadGPR(CPU_Context* ctx, int reg_index, int size) {
@@ -151,6 +203,25 @@ uint32_t GetOperandValue(CPU_Context* ctx, DecodeContext* d_ctx, int op_idx) {
 		case Gb: return ReadGPR(ctx, d_ctx->reg, 8);
 		case Gw: return ReadGPR(ctx, d_ctx->reg, 16);
 		case Gv: return ReadGPR(ctx, d_ctx->reg, op_size);
+		// 补充对 OP_AL ... OP_rDI 的支持
+		case OP_AL: return ReadGPR(ctx, 0, 8);
+		case OP_CL: return ReadGPR(ctx, 1, 8);
+		case OP_DL: return ReadGPR(ctx, 2, 8);
+		case OP_BL: return ReadGPR(ctx, 3, 8);
+		case OP_AH: return ReadGPR(ctx, 4, 8);
+		case OP_CH: return ReadGPR(ctx, 5, 8);
+		case OP_DH: return ReadGPR(ctx, 6, 8);
+		case OP_BH: return ReadGPR(ctx, 7, 8);
+		case OP_DX: return ReadGPR(ctx, 2, 16);
+		case OP_rAX: return ReadGPR(ctx, 0, op_size);
+		case OP_rCX: return ReadGPR(ctx, 1, op_size);
+		case OP_rDX: return ReadGPR(ctx, 2, op_size);
+		case OP_rBX: return ReadGPR(ctx, 3, op_size);
+		case OP_rSP: return ReadGPR(ctx, 4, op_size);
+		case OP_rBP: return ReadGPR(ctx, 5, op_size);
+		case OP_rSI: return ReadGPR(ctx, 6, op_size);
+		case OP_rDI: return ReadGPR(ctx, 7, op_size);
+
 		// --- 内存/寄存器 (ModR/M) ---
 		case Eb:
 		case Ew:
@@ -399,4 +470,128 @@ void Exec_Group1(CPU_Context* ctx, DecodeContext* d_ctx) {
 		case 6: Exec_ALU_Generic(ctx, d_ctx, ALU_XOR, false); break;
 		case 7: Exec_ALU_Generic(ctx, d_ctx, ALU_CMP, true); break;
 	}
+}
+
+// PUSH r32 / imm32 / imm8
+void Exec_PUSH(CPU_Context* ctx, DecodeContext* d_ctx) {
+	// 1. 读取要压入的值 (Op1)
+	// 注意处理 PUSH ESP 的特殊情况：Intel 规定压入的是执行指令前的 ESP 值
+	// 我们的 GetOperandValue 会读取当前的 ESP，这没问题。
+	uint32_t value = GetOperandValue(ctx, d_ctx, 0);
+	// 获取操作数大小 (通常是 32位，即 4字节)
+	int size = (d_ctx->pfx_op_size == 0x66) ? 2 : 4;
+	// 2. 调整 ESP (向下增长)
+	ctx->ESP.I32 -= size;
+	// 3. 写入内存
+	// Host-Passthrough: 直接写入 ctx->ESP 指向的地址
+	if (size == 4) {
+		*(uint32_t*)ctx->ESP.I32 = value;
+	}
+	else {
+		*(uint16_t*)ctx->ESP.I32 = (uint16_t)value;
+	}
+}
+// POP r32
+void Exec_POP(CPU_Context* ctx, DecodeContext* d_ctx) {
+	int size = (d_ctx->pfx_op_size == 0x66) ? 2 : 4;
+	// 1. 从栈顶读取数据
+	uint32_t val = 0;
+	if (size == 4) {
+		val = *(uint32_t*)ctx->ESP.I32;
+	}
+	else {
+		val = *(uint16_t*)ctx->ESP.I32;
+	}
+	// 2. 调整 ESP (向上收缩)
+	// 注意 POP ESP 的特殊情况：它会先读栈顶数据，然后 ESP+4，最后把读出的数据覆盖回 ESP。
+	// 结果就是 ESP 等于栈顶原来的那个值（ESP+4 被覆盖了）。
+	ctx->ESP.I32 += size;
+	// 3. 写入目的操作数 (Op1)
+	SetOperandValue(ctx, d_ctx, 0, val);
+}
+
+// 检查条件跳转是否成立 (Jcc)
+// condition_code: 输入指令码，取指令 Opcode 的低 4 位 (0x70-0x7F 或 0x80-0x8F 的低位)
+bool CheckCondition(CPU_Context* ctx, uint8_t condition_code) {
+	switch (condition_code & 0xF) {
+		case 0x0: return ctx->EFLAGS.OF == 1;          // JO
+		case 0x1: return ctx->EFLAGS.OF == 0;          // JNO
+		case 0x2: return ctx->EFLAGS.CF == 1;          // JB, JNAE (无符号 <)
+		case 0x3: return ctx->EFLAGS.CF == 0;          // JNB, JAE (无符号 >=)
+		case 0x4: return ctx->EFLAGS.ZF == 1;          // JZ, JE (等于)
+		case 0x5: return ctx->EFLAGS.ZF == 0;          // JNZ, JNE (不等于)
+		case 0x6: return (ctx->EFLAGS.CF | ctx->EFLAGS.ZF) == 1; // JBE, JNA (无符号 <=)
+		case 0x7: return (ctx->EFLAGS.CF | ctx->EFLAGS.ZF) == 0; // JA, JNBE (无符号 >)
+		case 0x8: return ctx->EFLAGS.SF == 1;          // JS
+		case 0x9: return ctx->EFLAGS.SF == 0;          // JNS
+		case 0xA: return ctx->EFLAGS.PF == 1;          // JP, JPE
+		case 0xB: return ctx->EFLAGS.PF == 0;          // JNP, JPO
+		case 0xC: return ctx->EFLAGS.SF != ctx->EFLAGS.OF;       // JL, JNGE (有符号 <)
+		case 0xD: return ctx->EFLAGS.SF == ctx->EFLAGS.OF;       // JNL, JGE (有符号 >=)
+		case 0xE: return ctx->EFLAGS.ZF == 1 || (ctx->EFLAGS.SF != ctx->EFLAGS.OF); // JLE, JNG (有符号 <=)
+		case 0xF: return ctx->EFLAGS.ZF == 0 && (ctx->EFLAGS.SF == ctx->EFLAGS.OF); // JG, JNLE (有符号 >)
+	}
+	return false; // 默认不跳转
+}
+// 处理相对跳转 (JMP, Jcc)
+// 返回 true 表示跳转发生
+bool Exec_Branch(CPU_Context* ctx, DecodeContext* d_ctx, bool is_conditional) {
+	bool take_jump = true;
+	if (is_conditional) {
+		// 如果是条件跳转，先检查条件
+		take_jump = CheckCondition(ctx, d_ctx->opcode);
+	}
+	if (take_jump) {
+		// 计算目标地址
+		// x86 相对跳转公式：Target = Current_EIP + Instruction_Length + Relative_Offset
+		// d_ctx->imm 存储的是相对偏移 (Relative Offset)
+		uint32_t offset = (uint32_t)d_ctx->imm;
+		ctx->EIP += d_ctx->instr_len + offset; 
+		return true; 
+	}
+	return false; // 未跳转
+}
+
+// 处理 CALL (相对调用)
+bool Exec_CALL(CPU_Context* ctx, DecodeContext* d_ctx) {
+	// 1. 计算返回地址 (下一条指令)
+	uint32_t ret_addr = ctx->EIP + d_ctx->instr_len;
+	// 2. 压入返回地址 (相当于 PUSH ret_addr)
+	ctx->ESP.I32 -= 4;
+	*(uint32_t*)ctx->ESP.I32 = ret_addr;
+	
+	// 3. 执行跳转
+	uint32_t offset = (uint32_t)d_ctx->imm;
+	ctx->EIP += d_ctx->instr_len + offset;
+	return true;
+}
+
+// 处理 RET (返回)
+bool Exec_RET(CPU_Context* ctx, DecodeContext* d_ctx) {
+	// 1. 弹出返回地址 (相当于 POP EIP)
+	uint32_t ret_addr = *(uint32_t*)ctx->ESP.I32;
+	ctx->ESP.I32 += 4;
+	// 2. 处理 RET n (带立即数的返回，用于平栈)
+	if(d_ctx->opcode == 0xC2 || d_ctx->opcode == 0xCA) { //以后CA处理段寄存器时再实现
+		ctx->ESP.I32 += d_ctx->imm;
+	}
+	// 3. 设置 EIP
+	ctx->EIP = ret_addr;
+	return true;
+}
+
+void Exec_DEC(CPU_Context* ctx, DecodeContext* d_ctx) {
+	int reg = d_ctx->opcode - 0x48;
+	uint32_t val = ReadGPR(ctx, reg, 32);
+	uint32_t res = val - 1;
+	UpdateEFLAGS(ctx, res, val, 1, 32, ALU_SUB);
+	WriteGPR(ctx, reg, 32, res);
+}
+
+void Exec_INC(CPU_Context* ctx, DecodeContext* d_ctx){
+	int reg = d_ctx->opcode - 0x40;
+uint32_t val = ReadGPR(ctx,reg,32);
+	uint32_t res = val + 1;
+	UpdateEFLAGS(ctx, res, val, 1, 32, ALU_ADD);
+	WriteGPR(ctx, reg, 32, res);
 }
