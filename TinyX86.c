@@ -25,7 +25,7 @@ int runcpu(CPU_Context* p, int step)
 		// 仅当没有发生跳转时，才推进 EIP
 		if (!jumped) p->EIP += instr_len;
 		// 调试打印 (可选，用于观察 Sprint 1 效果)
-		printf("[Trace] EIP=0x%08X | Instr: %s | Len: %d\n\n", p->EIP, d_ctx.asm_str, instr_len);
+		printf("[Trace] EIP=0x%08X | Instr: %s | Len: %d\n", p->EIP, d_ctx.asm_str, instr_len);
 
 	}
 	return 0;
@@ -113,12 +113,19 @@ bool ExecuteInstruction(CPU_Context* ctx, DecodeContext* d_ctx) {
 
 			// MOV (上一轮实现的)
 		case 0x88: case 0x89: case 0x8A: case 0x8B:
+		case 0xB0: case 0xB1: case 0xB2: case 0xB3:
+		case 0xB4: case 0xB5: case 0xB6: case 0xB7:
 		case 0xB8: case 0xB9: case 0xBA: case 0xBB:
 		case 0xBC: case 0xBD: case 0xBE: case 0xBF:
 		case 0xC6: case 0xC7: 
 			Exec_MOV_Reg_Imm(ctx, d_ctx); break;// 建议改名为更通用的 Exec_MOV
 			
 
+			// --- Sprint 5: Group 2 (Shift/Rotate) ---
+		case 0xC0: case 0xC1: // Grp2 Eb/Ev, Ib
+		case 0xD0: case 0xD1: // Grp2 Eb/Ev, 1
+		case 0xD2: case 0xD3: // Grp2 Eb/Ev, CL
+			Exec_Group2(ctx, d_ctx); break;
 
 
 		default:
@@ -594,4 +601,166 @@ uint32_t val = ReadGPR(ctx,reg,32);
 	uint32_t res = val + 1;
 	UpdateEFLAGS(ctx, res, val, 1, 32, ALU_ADD);
 	WriteGPR(ctx, reg, 32, res);
+}
+
+// 辅助：仅更新逻辑标志位 (ZF, SF, PF)
+void UpdateLogicFlags(CPU_Context* ctx, uint32_t res, int size) {
+	uint32_t truncated_res = res;
+	uint32_t sign_mask = 0;
+
+	if (size == 8) {truncated_res &= 0xFF; sign_mask = 0x80;}
+	else if (size == 16) {truncated_res &= 0xFFFF; sign_mask = 0x8000;}
+	else {sign_mask = 0x80000000;}
+	// ZF
+	ctx->EFLAGS.ZF = (truncated_res == 0) ? 1 : 0;
+	ctx->EFLAGS.SF = (truncated_res & sign_mask) ? 1 : 0;
+	ctx->EFLAGS.PF = CalcPF(truncated_res);
+}
+//处理Group2指令：SHL, SHR, SAR(移位) 和 ROL, ROR, RCL, RCR(循环移位)。
+void Exec_Group2(CPU_Context* ctx, DecodeContext* d_ctx) {
+	// 1. 确定位宽
+	int size = GetOperandBitSize(ctx, d_ctx, d_ctx->entry.op1);
+	uint32_t val = GetOperandValue(ctx, d_ctx, 0);// Dest
+
+	// 掩码用于截断高位垃圾
+	uint32_t mask = (size == 32) ? 0xFFFFFFFF : ((1 << size) - 1);
+	val &= mask;
+	// MSB 掩码 (最高位)
+	uint32_t msb_mask = 1 << (size - 1);
+	// 2. 确定移位次数 (Count)
+	// D0/D1/C0/C1 等 Opcode 已经在 disasm 阶段把立即数解析到了 imm，或者 CL 解析到了 op2
+	// 但 Group 2 比较特殊，我们需要手动判断一下来源
+	uint32_t count = 0;
+	if (d_ctx->opcode == 0xC0 || d_ctx->opcode == 0xC1){count = (uint32_t)d_ctx->imm;}
+	else if (d_ctx->opcode == 0xD0 || d_ctx->opcode == 0xD1) {count = 1;}// D0/D1 固定为 1
+	else if (d_ctx->opcode == 0xD2 || d_ctx->opcode == 0xD3) {count = ReadGPR(ctx, 1, 8); }// CL
+	// Intel 手册规定：移位次数只取低 5 位 (0-31)
+	count &= 0x1F;
+	if (count == 0) return; // 0 次移位不影响标志位
+	// 3. 根据 ModRM.reg 区分指令并执行
+	// 使用循环模拟，每次移 1 位，确保 CF/OF 正确
+	uint32_t res = val;
+	uint32_t original_msb = val & msb_mask; // 用于 SAR,原符符号位
+	// reg 字段定义:
+	// 0=ROL, 1=ROR, 2=RCL, 3=RCR, 4=SHL/SAL, 5=SHR, 7=SAR
+	switch (d_ctx->reg) {
+		case 0: { // ROL (循环左移)
+			for (int i = 0; i < count; i++) {
+				uint32_t bit = (res & msb_mask) ? 1 : 0;
+				ctx->EFLAGS.CF = bit; // CF = 移出的位
+				res <<= 1;
+				res |= bit; // 移出的位补到最低位
+			}
+			// OF (count=1): MSB ^ CF
+			if (count == 1) {
+				ctx->EFLAGS.OF = ((res & msb_mask) ? 1 : 0) ^ ctx->EFLAGS.CF;
+			}
+			break;
+		}
+
+		case 1: { // ROR (循环右移)
+			for (int i = 0; i < count; i++) {
+				uint32_t bit = res & 1;
+				res >>= 1;
+				ctx->EFLAGS.CF = bit; // CF = 移出的位
+				if (bit) res |= msb_mask; // 移出的位补到最高位
+			}
+			if (count == 1) {
+				// 根据 Intel 手册：OF = MSB(result) ^ MSB-1(result)
+				uint32_t msb = (res >> (size - 1)) & 1;
+				uint32_t msb_minus_1 = (res >> (size - 2)) & 1;
+				ctx->EFLAGS.OF = msb ^ msb_minus_1;
+			}
+			break;
+		}
+		
+		case 2: { // RCL (带进位的循环左移)
+			for (int i = 0; i < count; i++) {
+				uint32_t bit = (res & msb_mask) ? 1 : 0;
+				res <<= 1;
+				// 将 CF 补到最低位
+				if (ctx->EFLAGS.CF) {
+					res |= 1;
+				}
+				ctx->EFLAGS.CF = bit; // CF = 移出的位
+			}
+			// OF (count=1): MSB ^ CF
+			if (count == 1) {
+				ctx->EFLAGS.OF = ((res & msb_mask) ? 1 : 0) ^ ctx->EFLAGS.CF;
+			}
+			break;
+		}
+
+		case 3: { // RCR (带进位的循环右移)
+			for (int i = 0; i < count; i++) {
+				uint32_t bit = res & 1;
+				res >>= 1;
+				// 将 CF 补到最高位
+				if (ctx->EFLAGS.CF) {
+					res |= msb_mask;
+				}
+				ctx->EFLAGS.CF = bit; // CF = 移出的位
+			}
+			// OF (count=1): MSB ^ MSB-1
+			if (count == 1) {
+				uint32_t msb = (res >> (size - 1)) & 1;
+				uint32_t msb_minus_1 = (res >> (size - 2)) & 1;
+				ctx->EFLAGS.OF = msb ^ msb_minus_1;
+			}
+			break;
+		}
+		
+
+		case 4:{// SHL / SAL (逻辑左移)
+			for (int i = 0; i < count; i++) {// CF = 移出的最高位
+				ctx->EFLAGS.CF = (res & msb_mask) ? 1 : 0;
+				res <<= 1;
+			}
+			// OF (仅 count=1 时定义): 最高位是否改变 (MSB ^ CF)
+			if (count == 1) {
+				ctx->EFLAGS.OF = ctx->EFLAGS.CF ^ ((res & msb_mask) ? 1 : 0);
+			}
+			break;
+		}
+		
+		case 5: {
+			for (int i = 0; i < count; i++) {// CF = 移出的最低位
+				ctx->EFLAGS.CF = res & 1;
+				res >>= 1;
+			}
+			// OF (仅 count=1 时定义): 原最高位 (SHR 总是把最高位清0，所以看原最高位是否为1)
+			if (count == 1) {
+				ctx->EFLAGS.OF = (original_msb) ? 1 : 0;
+			}
+			break;
+		}
+
+		case 7: { // SAR (算术右移)
+			for (int i = 0; i < count; i++) {
+				ctx->EFLAGS.CF = res & 1;
+				res >>= 1;
+				// 保持符号位
+				if (original_msb) {
+					res |= msb_mask;
+				}
+			}
+			// OF (仅 count=1 时定义): SAR 不改变符号位，所以 OF 总是 0
+			if (count == 1) {
+				ctx->EFLAGS.OF = 0;
+			}
+			break;
+		}
+		default:
+			printf("Unimplemented Group 2(S/R) op: %d\n", d_ctx->reg);
+			return;
+
+	}
+
+	// 4. 写回结果
+	// 截断结果以防万
+	res &= mask;
+	// 更新 SF, ZF, PF
+	UpdateLogicFlags(ctx, res, size);
+	// 写回
+	SetOperandValue(ctx, d_ctx, 0, res);
 }

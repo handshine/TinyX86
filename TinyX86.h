@@ -64,6 +64,8 @@ typedef struct {
 
 }CPU_Context;
 
+int runcpu(CPU_Context* p, int step);
+
 // 修改 ExecuteInstruction 返回 bool
 // 返回 true: 表示指令发生了跳转 (EIP 已被修改)，调用者不需要再加 instr_len
 // 返回 false: 普通指令，调用者需要执行 EIP += instr_len
@@ -141,3 +143,7 @@ bool Exec_RET(CPU_Context* ctx, DecodeContext* d_ctx);
 void Exec_DEC(CPU_Context* ctx, DecodeContext* d_ctx);
 //处理INC
 void Exec_INC(CPU_Context* ctx, DecodeContext* d_ctx);
+// 辅助：仅更新逻辑标志位 (ZF, SF, PF)
+void UpdateLogicFlags(CPU_Context* ctx, uint32_t res, int size);
+//处理Group2指令：SHL, SHR, SAR(移位) 和 ROL, ROR, RCL, RCR(循环移位)。
+void Exec_Group2(CPU_Context* ctx, DecodeContext* d_ctx);
