@@ -121,11 +121,16 @@ bool ExecuteInstruction(CPU_Context* ctx, DecodeContext* d_ctx) {
 			Exec_MOV_Reg_Imm(ctx, d_ctx); break;// 建议改名为更通用的 Exec_MOV
 			
 
-			// --- Sprint 5: Group 2 (Shift/Rotate) ---
+			// --- Sprint 5.1: Group 2 (Shift/Rotate) ---
 		case 0xC0: case 0xC1: // Grp2 Eb/Ev, Ib
 		case 0xD0: case 0xD1: // Grp2 Eb/Ev, 1
 		case 0xD2: case 0xD3: // Grp2 Eb/Ev, CL
 			Exec_Group2(ctx, d_ctx); break;
+			// --- Sprint 5.2: Group 3 (MUL/DIV/NOT/NEG) ---
+		case 0xF6: // Group 3 (Byte)
+		case 0xF7: // Group 3 (Word/Dword)
+			Exec_Group3(ctx, d_ctx);
+			break;
 
 
 		default:
@@ -368,7 +373,7 @@ void UpdateEFLAGS(CPU_Context* ctx, uint32_t res, uint32_t dest, uint32_t src, i
 		// CF (Carry): 无符号溢出 (结果小于任一操作数)
 		// 注意：需比较截断前的 res 或者判断截断后的回绕
 		if (size == 32) ctx->EFLAGS.CF = (res < dest);
-		else ctx->EFLAGS.CF = (res & (sign_mask << 1) != 0); // 检查更高一位进位
+		else ctx->EFLAGS.CF = ((res & (sign_mask << 1)) != 0); // 检查更高一位进位//bug:修复了!= 与 &优先级的问题
 		// OF (Overflow): 有符号溢出 (正+正=负 或 负+负=正)
 		// 公式：(dest ^ res) & (src ^ res) & sign_mask
 		ctx->EFLAGS.OF = ((dest ^ truncated_res) & (src ^ truncated_res) & sign_mask)!= 0;
@@ -763,4 +768,223 @@ void Exec_Group2(CPU_Context* ctx, DecodeContext* d_ctx) {
 	UpdateLogicFlags(ctx, res, size);
 	// 写回
 	SetOperandValue(ctx, d_ctx, 0, res);
+}
+
+// 辅助：获取 Group 3 的源操作数 (Multiplier / Divisor)
+// 根据你的 disasm 表定义：
+// F6: MUL AL, Eb -> Op1=AL, Op2=Eb. 所以源操作数是 Op2 (index 1)
+// F6: NOT Eb     -> Op1=Eb.         所以源操作数是 Op1 (index 0)
+// 我们需要根据 reg 字段判断源在哪里
+uint32_t GetGroup3Source(CPU_Context* ctx, DecodeContext* d_ctx) {
+	// reg 0(TEST), 2(NOT), 3(NEG): 单操作数或立即数，源在 Op1 或 Op2(TEST)
+	// reg 4(MUL), 5(IMUL), 6(DIV), 7(IDIV): disasm 表定义了 Op1=Acc, Op2=Src. 所以源在 Op2
+	if (d_ctx->reg >= 4) {
+		return GetOperandValue(ctx, d_ctx, 1);
+	}
+	return GetOperandValue(ctx, d_ctx, 0); // NOT/NEG
+}
+
+// 写入 Group 3 结果
+void SetGroup3Dest(CPU_Context* ctx, DecodeContext* d_ctx, uint32_t val) {
+	SetOperandValue(ctx, d_ctx, 0, val);
+}
+
+// 处理 Group 3 指令 (F6/F7: TEST/NOT/NEG/MUL/IMUL/DIV/IDIV)
+void Exec_Group3(CPU_Context* ctx, DecodeContext* d_ctx) {
+	int size = GetOperandBitSize(ctx, d_ctx, d_ctx->entry.op1);
+	// 注意：对于 MUL/DIV，Op1 是 AL/AX/EAX，Op2 是 r/m。
+	// 我们主要关心 r/m 的大小，但在 disasm 表里 Op1 已经反映了正确的大小 (AL=8, EAX=32)
+
+	// 获取源操作数 (乘数 或 除数)
+	uint32_t src = GetGroup3Source(ctx, d_ctx);
+	// 针对 8/16 位截断源操作数，防止高位垃圾
+
+	if (size == 8) src &= 0xFF;
+	else if (size == 16) src &= 0xFFFF;
+
+	switch (d_ctx->reg) {
+		case 0: {// TEST (Iz/Ib)
+		// TEST 本质是 AND，但不写回
+		// 注意：F6/F7 的 TEST 指令结构通常是 TEST r/m, imm
+		// disasm 表里 group_tables[3/17] 的 index 0 是 TEST。
+		// 调用我们之前的通用 ALU 函数即可
+			Exec_ALU_Generic(ctx, d_ctx, ALU_AND, true); // TEST (AND + 不写回)
+			break;
+		}
+		case 2: {// NOT r/m 不影响标志位
+			SetGroup3Dest(ctx, d_ctx, ~src);
+			break;
+		}
+		case 3: {// NEG r/m 模拟 0 - src
+			SetGroup3Dest(ctx, d_ctx,(0-src));
+			UpdateEFLAGS(ctx, (0-src), 0, src, size, ALU_SUB);
+			break;
+		}
+		case 4: {// MUL (Unsigned Multiply) 算法：Accumulator * src
+			if (size == 8) {
+				// AL * r/m8 -> AX
+				uint32_t al = ctx->EAX.I8.L;
+				uint32_t res = al * src;
+				ctx->EAX.I16 = (uint16_t)res; // 结果写入 AX
+				// 更新 CF/OF: 如果高8位(AH)非0则置位
+				ctx->EFLAGS.CF = ctx->EFLAGS.OF = (res & 0xFF00) ? 1 : 0;
+
+			}
+			else if (size == 16) {
+				// AX * r/m16 -> DX:AX
+				uint32_t ax = ctx->EAX.I16;
+				uint32_t res = ax * src;
+				ctx->EDX.I16 = res >> 16; // 高16位写入 DX
+				ctx->EAX.I16 = res & 0xFFFF; // 低32位写入 AX
+				ctx->EFLAGS.CF = ctx->EFLAGS.OF = (ctx->EDX.I16 != 0);
+			}
+			else { //32
+				// EAX * r/m32 -> EDX:EAX
+				uint64_t eax = ctx->EAX.I32;
+				uint64_t res = eax * (uint64_t)src;
+				ctx->EDX.I32 = (uint32_t)(res >> 32); // 高32位写入 EDX
+				ctx->EAX.I32 = (uint32_t)(res & 0xFFFFFFFF); // 低32位写入 EAX
+				ctx->EFLAGS.CF = ctx->EFLAGS.OF = (ctx->EDX.I32 != 0);
+			}
+			break;
+		}
+		case 5: {
+			if (size == 32) {
+				int64_t eax = (int32_t)ctx->EAX.I32; //当你把一个 32 位的 int32_t 赋值给 64 位的 int64_t 时，C++ 编译器会自动触发符号扩展
+				int64_t val = (int32_t)src; //如果 src 的最高位是 1，val的前 32 位就会全被填充为 1。注意不要强制类型转换成（int64_t）,注意这种默认转换和强制转换的区别
+				int64_t res = eax * val;
+				ctx->EDX.I32 = (uint32_t)(res >> 32); // 高32位写入 EDX
+				ctx->EAX.I32 = (uint32_t)(res & 0xFFFFFFFF); // 低32位写入 EAX
+			// IMUL 标志位：如果结果需要扩展到高位才能表示，则 CF=OF=1
+			// 简单判断：如果 result != (int32_t)result，说明溢出了 32 位范围
+				bool overflow = (res != (int64_t)(int32_t)res);
+				ctx->EFLAGS.CF = ctx->EFLAGS.OF = overflow;
+			}
+			else if (size == 16) {
+				int32_t ax = (int16_t)ctx->EAX.I16;
+				int32_t val = (int16_t)src;
+				int32_t res = ax * val;
+				ctx->EDX.I16 = (uint32_t)(res >> 16); // 高16位写入 EDX
+				ctx->EAX.I16 = (uint32_t)(res & 0xFFFF); // 低16位写入 EAX
+				// IMUL 标志位：如果结果需要扩展到高位才能表示，则 CF=OF=1
+				// 简单判断：如果 result != (int32_t)result，说明溢出了 32 位范围
+				bool overflow = (res != (int32_t)(int16_t)res);
+				ctx->EFLAGS.CF = ctx->EFLAGS.OF = overflow;
+			}
+			else {
+				int16_t al = (int8_t)ctx->EAX.I8.L;
+				int16_t val = (int8_t)src;
+				int16_t res = al * val;
+				ctx->EAX.I16 = (uint16_t)res; // 结果写入 AX
+				bool overflow = (res != (int16_t)(int8_t)res);
+				ctx->EFLAGS.CF = ctx->EFLAGS.OF = overflow;
+			}
+			break;
+		}
+		case 6: {// DIV (Unsigned Divide)
+			if (src == 0) {
+				printf("[CPU Error] Division by Zero at EIP=0x%08X\n", ctx->EIP);
+				// 真实 CPU 会触发 Int 0 异常，这里我们暂时简单处理：不执行
+				return;
+			}
+			if (size == 32) {
+				uint64_t dividend = ((uint64_t)ctx->EDX.I32 << 32) | ctx->EAX.I32;
+				uint64_t quo = dividend / src;
+				uint64_t rem = dividend % src;
+				if (quo > 0xFFFFFFFF) {// 商溢出
+					printf("[CPU Error] quotient overflow at EIP=0x%08X\n", ctx->EIP);
+					return;
+				}
+				ctx->EAX.I32 = (uint32_t)quo;
+				ctx->EDX.I32 = (uint32_t)rem;
+				// DIV 标志位未定义，不做更新
+			}
+			else if (size == 16) {
+				uint32_t dividend = ((uint32_t)ctx->EDX.I16 << 16) | ctx->EAX.I16;
+				uint32_t quo = dividend / src;
+				uint32_t rem = dividend % src;
+				if (quo > 0xFFFF) {// 商溢出
+					printf("[CPU Error] quotient overflow at EIP=0x%08X\n", ctx->EIP);
+					return;
+				}
+				ctx->EAX.I16 = (uint16_t)quo;
+				ctx->EDX.I16 = (uint16_t)rem;
+			}
+			else {//8位
+				uint16_t dividend = ctx->EAX.I16; //被除数：AX
+				uint16_t quo = dividend / src;
+				uint16_t rem = dividend % src;
+				if (quo > 0xFF) {// 商溢出
+					printf("[CPU Error] quotient overflow at EIP=0x%08X\n", ctx->EIP);
+					return;
+				}//AH(余数):AL（商）
+				ctx->EAX.I8.L = (uint8_t)quo;
+				ctx->EAX.I8.H = (uint8_t)rem;
+			}
+			break;
+		}
+		case 7: { // IDIV (Signed Divide)
+			if (src == 0) {
+				printf("[CPU Error] Division by Zero at EIP=0x%08X\n", ctx->EIP);
+				return;
+			}
+
+			if (size == 8) {
+				// 【8位】被除数：AX (16位有符号)
+				int16_t dividend = (int16_t)ctx->EAX.I16;
+				int8_t  divisor = (int8_t)src;
+
+				// 特判 INT8_MIN / -1
+				if (dividend == -128 && divisor == -1) goto overflow_label;
+
+				int16_t quo = dividend / divisor;
+				int16_t rem = dividend % divisor;
+
+				if (quo > 127 || quo < -128) goto overflow_label;
+
+				ctx->EAX.I8.L = (int8_t)quo; // AL
+				ctx->EAX.I8.H = (int8_t)rem; // AH
+			}
+			else if (size == 16) {
+				// 【16位】被除数：DX:AX (32位有符号拼接)
+				int32_t dividend = (int32_t)(((uint32_t)ctx->EDX.I16 << 16) | (uint16_t)ctx->EAX.I16);
+				int16_t divisor = (int16_t)src;
+
+				if (dividend == (int32_t)0x80000000 && divisor == -1) goto overflow_label;
+
+				int32_t quo = dividend / divisor;
+				int32_t rem = dividend % divisor;
+
+				if (quo > 32767 || quo < -32768) goto overflow_label;
+
+				ctx->EAX.I16 = (int16_t)quo; // AX
+				ctx->EDX.I16 = (int16_t)rem; // DX
+			}
+			else if (size == 32) {
+				// 【32位】被除数：EDX:EAX (64位有符号拼接)
+				int64_t dividend = (int64_t)(((uint64_t)ctx->EDX.I32 << 32) | (uint32_t)ctx->EAX.I32);
+				int32_t divisor = (int32_t)src;
+
+				// 特判 LLONG_MIN 情况，防止 C++ 进程直接崩溃
+				if (dividend == (int64_t)0x8000000000000000 && divisor == -1) goto overflow_label;
+
+				int64_t quo = dividend / divisor;
+				int64_t rem = dividend % divisor;
+
+				if (quo > 2147483647LL || quo < -2147483648LL) goto overflow_label;
+
+				ctx->EAX.I32 = (uint32_t)quo; // EAX
+				ctx->EDX.I32 = (uint32_t)rem; // EDX
+			}
+			break;
+
+		overflow_label:
+			printf("[CPU Error] IDIV Quotient Overflow at EIP=0x%08X\n", ctx->EIP);
+			// 这里只 return，不修改任何寄存器，模拟真 CPU 的异常挂起行为
+			return;
+		}
+		default:
+			printf("Group 3 error opcode: %d\n", d_ctx->reg);
+	}
+	return;
 }
