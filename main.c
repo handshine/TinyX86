@@ -3,53 +3,54 @@
 #include <string.h>
 
 int main() {
-    /* 测试代码逻辑：
-       1. MOV AL, 0xF0 (1111 0000)
-       2. SHL AL, 1    -> 0xE0 (1110 0000), CF=1 (最高位1移出)
-       3. SHR AL, 2    -> 0x38 (0011 1000), CF=0 (低位0移出)
-       4. MOV CL, 4
-       5. SAR AL, CL   -> 0x03 (0000 0011) (算术右移，符号位为0)
-       6. MOV AL, 0x80
-       7. SAR AL, 1    -> 0xC0 (1100 0000) (算术右移，符号位为1，保持符号)
+    /* 测试逻辑：
+       1. MOV EAX, 10       (B8 0A 00 00 00)
+       2. MOV ECX, 5        (B9 05 00 00 00)
+       3. MUL ECX           (F7 E1) -> EDX:EAX = 50 (0x32)
+       4. MOV EBX, EAX      (89 C3) -> 备份 50 到 EBX
+       5. NOT EAX           (F7 D0) -> 按位取反
+       6. NEG EBX           (F7 DB) -> 变负数 (-50)
+       7. DIV ECX           (F7 F1) -> 这里有个坑！DIV 除的是 EDX:EAX。
+                                       如果不清空 EDX，会除出天文数字甚至溢出。
+                                       所以我们先 XOR EDX, EDX。
     */
     uint8_t code[] = {
-        0xB0, 0xF0,             // MOV AL, 0xF0
-        0xD0, 0xE0,             // SHL AL, 1 (ModRM: reg=4 SHL, rm=0 AL. wait, D0 E0? E0 is 11 100 000. reg=4(SHL). rm=0(AL) -> ModRM 0xE0? No, 11 100 000 is E0. AL is usually index 0. Let's assume your disasm handles register mapping correctly. D0 /4 -> D0 E0 (reg=4, rm=0, mod=3))
-        0xC0, 0xE8, 0x02,       // SHR AL, 2 (C0 /5, imm=2. ModRM E8: 11 101 000)
+        0xB8, 0x0A, 0x00, 0x00, 0x00,   // MOV EAX, 10
+        0xB9, 0x05, 0x00, 0x00, 0x00,   // MOV ECX, 5
+        0xF7, 0xE1,                     // MUL ECX
 
-        0xB1, 0x04,             // MOV CL, 4
-        0xD2, 0xF8,             // SAR AL, CL (D2 /7. ModRM F8: 11 111 000)
+        // 验证 NEG
+        0x89, 0xC3,                     // MOV EBX, EAX (50)
+        0xF7, 0xDB,                     // NEG EBX (-50 = 0xFFFFFFCE)
 
-        // 测试 SAR 符号位保持
-        0xB0, 0x80,             // MOV AL, 0x80 (-128)
-        0xD0, 0xF8,             // SAR AL, 1
-        0x90                    // NOP
+        // 验证 DIV (需要先清零 EDX，为了方便测试，我直接用 MOV EDX, 0)
+        0xBA, 0x00, 0x00, 0x00, 0x00,   // MOV EDX, 0
+        0xB8, 0x64, 0x00, 0x00, 0x00,   // MOV EAX, 100 (0x64)
+        0xF7, 0xF1,                     // DIV ECX (100 / 5 = 20)
+
+        0x90                            // NOP
     };
 
     CPU_Context ctx;
     memset(&ctx, 0, sizeof(ctx));
     ctx.EIP = (DWORD)code;
 
-    printf("Sprint 5 Test: Shift & Rotate\n");
+    printf("Sprint 5 Test: MUL / DIV / NEG\n");
 
-    // 1. MOV AL, F0
-    runcpu(&ctx, 1);
-
-    // 2. SHL AL, 1
-    runcpu(&ctx, 1);
-    printf("SHL Result: 0x%02X (Exp: E0), CF=%d (Exp: 1)\n", ctx.GPR[0].I8.L, ctx.EFLAGS.CF);
-
-    // 3. SHR AL, 2
-    runcpu(&ctx, 1);
-    printf("SHR Result: 0x%02X (Exp: 38)\n", ctx.GPR[0].I8.L);
-
-    // 4. MOV CL, 4 + SAR AL, CL
+    // 1. Init
     runcpu(&ctx, 2);
-    printf("SAR Result (Pos): 0x%02X (Exp: 03)\n", ctx.GPR[0].I8.L);
 
-    // 5. MOV AL, 80 + SAR AL, 1
-    runcpu(&ctx, 2);
-    printf("SAR Result (Neg): 0x%02X (Exp: C0), OF=%d (Exp: 0)\n", ctx.GPR[0].I8.L, ctx.EFLAGS.OF);
+    // 2. MUL ECX
+    runcpu(&ctx, 1);
+    printf("MUL Res: EAX=%d (Exp: 50), EDX=%d\n", ctx.GPR[0].I32, ctx.GPR[2].I32);
+
+    // 3. NEG EBX
+    runcpu(&ctx, 2); // MOV + NEG
+    printf("NEG Res: EBX=0x%X (Exp: 0xFFFFFFCE / -50)\n", ctx.GPR[3].I32);
+
+    // 4. DIV ECX
+    runcpu(&ctx, 3); // MOV EDX + MOV EAX + DIV
+    printf("DIV Res: EAX=%d (Exp: 20), EDX=%d (Rem: 0)\n", ctx.GPR[0].I32, ctx.GPR[2].I32);
 
     return 0;
 }

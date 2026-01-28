@@ -143,7 +143,15 @@ bool Exec_RET(CPU_Context* ctx, DecodeContext* d_ctx);
 void Exec_DEC(CPU_Context* ctx, DecodeContext* d_ctx);
 //处理INC
 void Exec_INC(CPU_Context* ctx, DecodeContext* d_ctx);
+
 // 辅助：仅更新逻辑标志位 (ZF, SF, PF)
 void UpdateLogicFlags(CPU_Context* ctx, uint32_t res, int size);
 //处理Group2指令：SHL, SHR, SAR(移位) 和 ROL, ROR, RCL, RCR(循环移位)。
 void Exec_Group2(CPU_Context* ctx, DecodeContext* d_ctx);
+
+// 辅助：获取 Group 3 的源操作数 (Multiplier / Divisor)
+uint32_t GetGroup3Source(CPU_Context* ctx, DecodeContext* d_ctx);
+// 写入 Group 3 结果
+void SetGroup3Dest(CPU_Context* ctx, DecodeContext* d_ctx, uint32_t val);
+// 处理 Group 3 指令 (MUL, IMUL, DIV, IDIV)
+void Exec_Group3(CPU_Context* ctx, DecodeContext* d_ctx);
