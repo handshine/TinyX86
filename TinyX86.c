@@ -119,7 +119,50 @@ bool ExecuteInstruction(CPU_Context* ctx, DecodeContext* d_ctx) {
 		case 0xBC: case 0xBD: case 0xBE: case 0xBF:
 		case 0xC6: case 0xC7: 
 			Exec_MOV_Reg_Imm(ctx, d_ctx); break;// 建议改名为更通用的 Exec_MOV
-			
+
+		case 0xA0: // MOV AL, moffs8
+			// 指令格式：A0 [offset32]
+			// 注意：这里的 d_ctx->imm 应该是解码阶段读取到的 4 字节地址偏移
+			ctx->GPR[0].I8.L = (uint8_t)MemRead(d_ctx->imm, 1);
+			break;
+
+		case 0xA1: // MOV EAX, moffs16/32
+		{
+			int size = (d_ctx->pfx_op_size == 0x66) ? 2 : 4;
+			if (size == 2) ctx->GPR[0].I16 = (uint16_t)MemRead(d_ctx->imm, 2);
+			else ctx->GPR[0].I32 = MemRead(d_ctx->imm, 4);
+		}
+		break;
+		case 0xA2: // MOV moffs8, AL
+			MemWrite(d_ctx->imm, ctx->GPR[0].I8.L, 1);
+			break;
+		case 0xA3: // MOV moffs16/32, EAX
+		{
+			int size = (d_ctx->pfx_op_size == 0x66) ? 2 : 4;
+			if (size == 2) MemWrite(d_ctx->imm, ctx->GPR[0].I16, 2);
+			else MemWrite(d_ctx->imm, ctx->GPR[0].I32, 4);
+		}
+		break;
+
+			//sprint6:字符串操作
+		case 0xA4: case 0xA5: // MOVS
+		case 0xA6: case 0xA7: // CMPS
+		case 0xAA: case 0xAB: // STOS
+		case 0xAC: case 0xAD: // LODS	
+		case 0xAE: case 0xAF: // SCANS
+			if(d_ctx->pfx_rep || d_ctx->pfx_repne) {
+				// 委托给 REP 处理器
+				// 注意：Exec_REP_StringOp 内部会返回 true (保持 EIP) 或 false (推进 EIP)
+				// 这与 jumped 的语义完全一致
+				return Exec_REP_StringOp(ctx, d_ctx);
+			}
+			else
+			{
+				// 没有前缀，执行一次，EIP 正常前进
+				Exec_StringOp(ctx, d_ctx);
+				return false;
+			}
+			break;
 
 			// --- Sprint 5.1: Group 2 (Shift/Rotate) ---
 		case 0xC0: case 0xC1: // Grp2 Eb/Ev, Ib
@@ -127,10 +170,24 @@ bool ExecuteInstruction(CPU_Context* ctx, DecodeContext* d_ctx) {
 		case 0xD2: case 0xD3: // Grp2 Eb/Ev, CL
 			Exec_Group2(ctx, d_ctx); break;
 			// --- Sprint 5.2: Group 3 (MUL/DIV/NOT/NEG) ---
+		case 0xF5:
+			ctx->EFLAGS.CF ^= 1; break;// CMC
 		case 0xF6: // Group 3 (Byte)
 		case 0xF7: // Group 3 (Word/Dword)
 			Exec_Group3(ctx, d_ctx);
 			break;
+		case 0xF8:
+			ctx->EFLAGS.CF = 0; break;
+		case 0xF9:
+			ctx->EFLAGS.CF = 0; break;
+		case 0xFA:
+			ctx->EFLAGS.IF = 0; break;
+		case 0xFB:
+			ctx->EFLAGS.IF = 1; break;
+		case 0xFC:
+			ctx->EFLAGS.DF = 0; break;
+		case 0xFD:
+			ctx->EFLAGS.DF = 1; break;
 
 
 		default:
@@ -244,12 +301,9 @@ uint32_t GetOperandValue(CPU_Context* ctx, DecodeContext* d_ctx, int op_idx) {
 				return ReadGPR(ctx, d_ctx->rm, size_E);
 			}
 			else {
-				// 计算有效地址
 				uint32_t addr = GetEffectiveAddress(ctx, d_ctx);
-				// Host-Passthrough: 直接读取内存
-				if (type == Eb) return *(uint8_t*)addr;
-				if (type == Ew) return *(uint16_t*)addr;
-				return *(uint32_t*)addr;
+				int byte_len = (type == Eb) ? 1 : ((type == Ew) ? 2 : (op_size / 8));
+				return MemRead(addr, byte_len); //读取内存并返回
 			}
 		}
 		// --- 立即数 ---
@@ -284,12 +338,9 @@ void SetOperandValue(CPU_Context* ctx, DecodeContext* d_ctx, int op_idx, uint32_
 				WriteGPR(ctx, d_ctx->rm, size_E, value);
 			}
 			else {
-				// 计算有效地址
 				uint32_t addr = GetEffectiveAddress(ctx, d_ctx);
-				// Host-Passthrough: 直接写入内存
-				if (type == Eb) *(uint8_t*)addr = (uint8_t)value;
-				else if (type == Ew) *(uint16_t*)addr = (uint16_t)value;
-				else *(uint32_t*)addr = value;
+				int byte_len = (type == Eb) ? 1 : ((type == Ew) ? 2 : (op_size / 8));
+				MemWrite(addr, value, byte_len); // 调用提取出来的函数
 			}
 			break;
 		}
@@ -987,4 +1038,100 @@ void Exec_Group3(CPU_Context* ctx, DecodeContext* d_ctx) {
 			printf("Group 3 error opcode: %d\n", d_ctx->reg);
 	}
 	return;
+}
+
+uint32_t MemRead(uint32_t addr, int byte_len) {
+	if (byte_len == 1) return *(uint8_t*)addr;
+	else if(byte_len == 2)return *(uint16_t*)addr;
+	return *(uint32_t*)addr;
+}
+
+void MemWrite(uint32_t addr, uint32_t val, int byte_len) {
+	if (byte_len == 1) *(uint8_t*)addr = (uint8_t)val;
+	else if(byte_len == 2) *(uint16_t*)addr = (uint16_t)val;
+	else *(uint32_t*)addr = val;
+}
+
+
+void Exec_StringOp(CPU_Context* ctx, DecodeContext* d_ctx) {
+	// 1. 确定宽度
+	int bit_sz = (d_ctx->opcode & 1) ? ((d_ctx->pfx_op_size == 0x66) ? 16 : 32) : 8;
+	int byte_len = bit_sz / 8;
+
+	// 2. 预计算步长 (核心优化)
+	int step = (ctx->EFLAGS.DF == 0) ? byte_len : -byte_len;
+
+	// 3. 获取当前地址
+	uint32_t esi = ctx->GPR[6].I32;
+	uint32_t edi = ctx->GPR[7].I32;
+
+	switch (d_ctx->opcode & 0xFE) {
+		case 0xA4: {// MOVS
+			MemWrite(edi, MemRead(esi, byte_len), byte_len);
+			ctx->ESI.I32 += step;
+			ctx->EDI.I32 += step;
+			break;
+		}
+		case 0xA6: { // CMPS
+			uint32_t val_src = MemRead(esi, byte_len);
+			uint32_t val_dest = MemRead(edi, byte_len);
+			uint32_t res = val_dest - val_src;
+			UpdateEFLAGS(ctx, res, val_dest, val_src, bit_sz, ALU_SUB);
+			ctx->EDI.I32 += step;
+			ctx->ESI.I32 += step;
+			break;
+		}
+		case 0xAA: { // STOS
+			uint32_t val = 0;
+			if (bit_sz == 8) val = ctx->EAX.I8.L;
+			else if (bit_sz == 16) val = ctx->EAX.I16;
+			else if (bit_sz == 32) val = ctx->EAX.I32;
+			MemWrite(edi, val, byte_len);
+			ctx->EDI.I32 += step;
+			break;
+		}
+		case 0xAC: {//LODS
+			uint32_t val = MemRead(esi, byte_len);
+			if (bit_sz == 8) ctx->EAX.I8.L = (uint8_t)val;
+			else if (bit_sz == 16) ctx->EAX.I16 = (uint16_t)val;
+			else if (bit_sz == 32) ctx->EAX.I32 = val;
+			ctx->ESI.I32 += step;
+			break;
+		}
+		case 0xAE: { // SCAS
+			uint32_t val_dest = MemRead(edi, byte_len);
+			uint32_t val_src = 0;
+			if (bit_sz == 8) val_src = ctx->EAX.I8.L;
+			else if (bit_sz == 16) val_src = ctx->EAX.I16;
+			else if (bit_sz == 32) val_src = ctx->EAX.I32;
+			uint32_t res = val_dest - val_src;
+			UpdateEFLAGS(ctx, res, val_dest, val_src, bit_sz, ALU_SUB);
+			ctx->EDI.I32 += step;
+			break;
+		}
+	}
+}
+
+bool Exec_REP_StringOp(CPU_Context* ctx, DecodeContext* d_ctx) {
+	// 1. 初始检查：如果 ECX 已经到 0，循环彻底结束
+	if(ctx->ECX.I32 == 0) return false;
+	// 2. 执行单次操作
+	Exec_StringOp(ctx, d_ctx);
+	//3. 递减 ECX
+	ctx->ECX.I32--;
+	// 4. 判断是否要“停在原地”继续下一次循环
+	// 基本条件：ECX 还没减到 0
+	bool should_continue = (ctx->ECX.I32 > 0);
+	// 5. 处理 SCAS / CMPS 的额外终止条件 (ZF)
+	// 技巧：利用位运算快速识别 A6, A7 (CMPS) 和 AE, AF (SCAS)
+	bool is_compare_op = (d_ctx->opcode & 0xA6) == 0xA6;
+	if (is_compare_op && should_continue) {
+		if (d_ctx->pfx_rep) {
+			should_continue = (ctx->EFLAGS.ZF == 1); // REPE/REPZ
+		}
+		else if (d_ctx->pfx_repne) {
+			should_continue = (ctx->EFLAGS.ZF == 0); // REPNE/REPNZ
+		}
+	}
+	return should_continue;
 }

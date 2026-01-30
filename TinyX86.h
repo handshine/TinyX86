@@ -155,3 +155,12 @@ uint32_t GetGroup3Source(CPU_Context* ctx, DecodeContext* d_ctx);
 void SetGroup3Dest(CPU_Context* ctx, DecodeContext* d_ctx, uint32_t val);
 // 处理 Group 3 指令 (MUL, IMUL, DIV, IDIV)
 void Exec_Group3(CPU_Context* ctx, DecodeContext* d_ctx);
+//内存读辅助函数,返回读取的值
+uint32_t MemRead(uint32_t addr, int byte_len);
+//内存写辅助函数
+void MemWrite(uint32_t addr,uint32_t val, int byte_len);
+
+// 执行串操作指令
+void Exec_StringOp(CPU_Context* ctx, DecodeContext* d_ctx);
+//rep/repne 前缀处理串操作指令
+bool Exec_REP_StringOp(CPU_Context* ctx, DecodeContext* d_ctx);
