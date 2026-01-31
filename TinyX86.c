@@ -109,7 +109,6 @@ bool ExecuteInstruction(CPU_Context* ctx, DecodeContext* d_ctx) {
 			// 如果 d_ctx->is_two_byte_opcode 为真，你需要在这里特判或者用两张 switch 表。
 			// Sprint 4 简化起见，先假设我们只处理 0x7x 系列短跳转。
 
-		case 0x90: break; // NOP
 
 			// MOV (上一轮实现的)
 		case 0x88: case 0x89: case 0x8A: case 0x8B:
@@ -169,6 +168,7 @@ bool ExecuteInstruction(CPU_Context* ctx, DecodeContext* d_ctx) {
 		case 0xD0: case 0xD1: // Grp2 Eb/Ev, 1
 		case 0xD2: case 0xD3: // Grp2 Eb/Ev, CL
 			Exec_Group2(ctx, d_ctx); break;
+
 			// --- Sprint 5.2: Group 3 (MUL/DIV/NOT/NEG) ---
 		case 0xF5:
 			ctx->EFLAGS.CF ^= 1; break;// CMC
@@ -188,7 +188,21 @@ bool ExecuteInstruction(CPU_Context* ctx, DecodeContext* d_ctx) {
 			ctx->EFLAGS.DF = 0; break;
 		case 0xFD:
 			ctx->EFLAGS.DF = 1; break;
-
+			//sprint7: EFLAGS操作与enter，leave，lea，xchg
+		case 0x8D: Exec_LEA(ctx, d_ctx); break; // LEA 指令
+			// NOP
+		case 0x90: break; // NOP
+		case 0x86:case 0x87: // XCHG Eb, Gb / Ev, Gv
+		case 0x91:case 0x92: case 0x93: case 0x94: case 0x95:case 0x96:case 0x97: //XCHG
+			Exec_XCHG(ctx, d_ctx); break;
+		case 0x9C:
+			Exec_PUSHF(ctx); break; // PUSHF
+		case 0x9D:
+			Exec_POPF(ctx); break; // POPF
+		case 0xC8:
+			Exec_ENTER(ctx, d_ctx); break; // ENTER
+		case 0xC9:
+			Exec_LEAVE(ctx); break; // LEAVE
 
 		default:
 			printf("Unimplemented: 0x%02X\n", d_ctx->opcode);
@@ -1134,4 +1148,94 @@ bool Exec_REP_StringOp(CPU_Context* ctx, DecodeContext* d_ctx) {
 		}
 	}
 	return should_continue;
+}
+
+void Exec_LEA(CPU_Context* ctx, DecodeContext* d_ctx) {
+	// 1. 计算有效地址 (Effective Address)
+	// 这里的核心是复用 GetEffectiveAddress，但坚决不要调用 MemRead！
+	uint32_t addr = GetEffectiveAddress(ctx, d_ctx);
+	// 2. 将地址本身写入目的寄存器
+	// LEA 的目的操作数通常是 Gv (32位通用寄存器)
+	SetOperandValue(ctx, d_ctx, 0, addr);
+	// 注意：LEA 不改变任何标志位 (EFLAGS)
+}
+
+void Exec_XCHG(CPU_Context* ctx, DecodeContext* d_ctx) {
+	uint32_t op1= GetOperandValue(ctx, d_ctx, 0);
+	uint32_t op2 = GetOperandValue(ctx, d_ctx, 1);
+	SetOperandValue(ctx, d_ctx, 1, op1);
+	SetOperandValue(ctx, d_ctx, 0, op2);
+}
+
+// 辅助：将 EFLAGS 结构体打包成 32位 整数
+uint32_t PackEFLAGS(CPU_Context* ctx)
+{
+	// 简单粗暴法：利用 union 的共用体特性 (假设是小端序)
+	// 但为了严谨，x86 规定 Bit 1 永远是 1，Bit 3,5,15 永远是 0
+	uint32_t raw = ctx->EFLAGS.Value;
+	raw |= 0x00000002; // Bit 1 always 1
+	raw &= ~0x00008028; // Bit 3, 5, 15 always 0 (0x8000 + 0x20 + 0x08)
+	return raw;
+}
+
+// 辅助：从 32位 整数解包到 EFLAGS
+void UnpackEFLAGS(CPU_Context* ctx, uint32_t val)
+{
+	// 保留位处理：通常我们不希望用户修改保留位
+	// 但模拟器为了简单，可以直接赋值，只是强行修正固定位
+	ctx->EFLAGS.Value = val;
+	ctx->EFLAGS.Value |= 0x00000002; // Bit 1 always 1
+}
+
+// PUSHF (0x9C)
+void Exec_PUSHF(CPU_Context* ctx) {
+	uint32_t eflags = PackEFLAGS(ctx);
+	// 压栈 (32位)
+	ctx->ESP.I32 -= 4;
+	MemWrite(ctx->ESP.I32, eflags, 4);
+}
+//POPF (0x9D)
+void Exec_POPF(CPU_Context* ctx) {
+	// 弹栈 (32位)
+	uint32_t eflags = MemRead(ctx->ESP.I32, 4);
+	ctx->ESP.I32 += 4;
+	UnpackEFLAGS(ctx, eflags);
+}
+// LEAVE (0xC9): 恢复栈帧
+// 等价于: MOV ESP, EBP; POP EBP;
+void Exec_LEAVE(CPU_Context* ctx) {
+	ctx->ESP.I32 = ctx->EBP.I32;
+	ctx->EBP.I32 = MemRead(ctx->ESP.I32, 4);
+	ctx->ESP.I32 += 4;
+}
+// 从解码上下文中获取参数
+// 解码器把第一个立即数(size)放在 imm，第二个(level)放在 imm2
+void Exec_ENTER(CPU_Context* ctx, DecodeContext* d_ctx) {
+	// 参数1:分配的栈空间大小 (16位)
+	uint16_t size = (uint16_t)d_ctx->imm;
+	// 参数2:调用层级 (16位)
+	uint8_t level = (uint8_t)(d_ctx->imm2 & 0x1F); // Intel 限制最大 31 层
+	// 2. PUSH EBP (保存旧的帧指针)
+	ctx->ESP.I32 -= 4;
+	MemWrite(ctx->ESP.I32, ctx->EBP.I32, 4);
+	// 暂存当前的栈顶作为新的帧指针起点
+	uint32_t fp = ctx->ESP.I32;
+	// 2. 处理嵌套层级 (Display)
+	// 这是为了让嵌套函数能访问父级函数的局部变量
+	if (level > 0) {
+		uint32_t temp_fp = ctx->EBP.I32;//初始还是父函数的ebp起始
+		for (int i = 1; i < level; i++) {//从1开开始，当前的栈指针在后面给
+			temp_fp -= 4;
+			ctx->ESP.I32 -= 4;
+			uint32_t parent_fp = MemRead(temp_fp, 4);
+			MemWrite(ctx->ESP.I32, parent_fp, 4);
+		}
+		// 最后一次 PUSH 当前的帧指针
+		ctx->ESP.I32 -= 4;
+		MemWrite(ctx->ESP.I32, fp, 4);
+	}
+	//3.更新寄存器状态,分配栈空间
+	ctx->EBP.I32 = fp;
+	ctx->ESP.I32 -= size;
+
 }

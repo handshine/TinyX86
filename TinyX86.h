@@ -164,3 +164,24 @@ void MemWrite(uint32_t addr,uint32_t val, int byte_len);
 void Exec_StringOp(CPU_Context* ctx, DecodeContext* d_ctx);
 //rep/repne 前缀处理串操作指令
 bool Exec_REP_StringOp(CPU_Context* ctx, DecodeContext* d_ctx);
+
+// 处理 LEA 指令 (0x8D)
+void Exec_LEA(CPU_Context* ctx, DecodeContext* d_ctx);
+
+// 辅助：将 EFLAGS 结构体打包成 32位 整数
+uint32_t PackEFLAGS(CPU_Context* ctx);
+// 辅助：从 32位 整数解包到 EFLAGS
+void UnpackEFLAGS(CPU_Context* ctx, uint32_t val);
+//XCHG(0x90-0x97)
+void Exec_XCHG(CPU_Context* ctx, DecodeContext* d_ctx);
+// PUSHF (0x9C)
+void Exec_PUSHF(CPU_Context* ctx);
+// POPF (0x9D)
+void Exec_POPF(CPU_Context* ctx);
+
+// LEAVE (0xC9): 恢复栈帧
+// 等价于: MOV ESP, EBP; POP EBP;
+void Exec_LEAVE(CPU_Context* ctx);
+// ENTER (0xC8): 建立栈帧
+// 指令格式: ENTER size(16), level(8)
+void Exec_ENTER(CPU_Context* ctx, DecodeContext* d_ctx);
