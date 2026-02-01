@@ -36,6 +36,55 @@ int runcpu(CPU_Context* p, int step)
 bool ExecuteInstruction(CPU_Context* ctx, DecodeContext* d_ctx) {
 	// 默认不跳转
 	bool jumped = false;
+
+	// ========================================================
+		// 分支 A: 处理双字节指令 (0x0F B6 ...)
+		// ========================================================
+	if (d_ctx->is_two_byte_opcode) {
+		switch (d_ctx->opcode) {
+			// --- CMOVcc (0x40 - 0x4F) ---
+			case 0x40: case 0x41: case 0x42: case 0x43:
+			case 0x44: case 0x45: case 0x46: case 0x47:
+			case 0x48: case 0x49: case 0x4A: case 0x4B:
+			case 0x4C: case 0x4D: case 0x4E: case 0x4F:
+				Exec_CMOVcc(ctx, d_ctx);break;
+
+			//  Long Conditional Jumps (0x80 - 0x8F)
+			// Jcc Jz (16/32 bit offset)
+			case 0x80: case 0x81: case 0x82: case 0x83:
+			case 0x84: case 0x85: case 0x86: case 0x87:
+			case 0x88: case 0x89: case 0x8A: case 0x8B:
+			case 0x8C: case 0x8D: case 0x8E: case 0x8F:// 直接复用 Exec_Branch！
+				jumped = Exec_Branch(ctx, d_ctx, true);// 这里的 opcode 低4位完美对应 CheckCondition 的条件码
+				break;// d_ctx->imm 已经是 16/32 位偏移
+
+			// SETcc (0x90 - 0x9F) - 之前实现的
+			case 0x90: case 0x91: case 0x92: case 0x93:
+			case 0x94: case 0x95: case 0x96: case 0x97:
+			case 0x98: case 0x99: case 0x9A: case 0x9B:
+			case 0x9C: case 0x9D: case 0x9E: case 0x9F:
+				Exec_SETcc(ctx, d_ctx);break;
+
+		
+			// --- IMUL (双操作数 Gv, Ev) ---
+			case 0xAF:
+				Exec_IMUL_2_Op(ctx, d_ctx);break;
+			// --- MOVZX (0xB6, 0xB7) ---
+			case 0xB6: Exec_MOVZX(ctx, d_ctx, 8);  break; // Byte -> Dword
+			case 0xB7: Exec_MOVZX(ctx, d_ctx, 16); break; // Word -> Dword
+			// --- MOVSX (0xBE, 0xBF) ---
+			case 0xBE: Exec_MOVSX(ctx, d_ctx, 8);  break; // Byte -> Dword
+			case 0xBF: Exec_MOVSX(ctx, d_ctx, 16); break; // Word -> Dword
+
+			default:
+				printf("[CPU Error] Unimplemented 2-byte opcode: 0x0F %02X\n", d_ctx->opcode);
+		}
+		return jumped;// 双字节指令大多不涉及跳转 (除了长跳转 0x8x)
+	}
+
+	// ========================================================
+		// 分支 B: 处理单字节指令
+		// ========================================================
 	switch (d_ctx->opcode) {
 		// --- Sprint 3 新增 ---
 		// Group 1 (立即数运算)
@@ -203,6 +252,11 @@ bool ExecuteInstruction(CPU_Context* ctx, DecodeContext* d_ctx) {
 			Exec_ENTER(ctx, d_ctx); break; // ENTER
 		case 0xC9:
 			Exec_LEAVE(ctx); break; // LEAVE
+			//sprint8:  FF /2, FF /4 0x0F ... MOVZX, MOVSX SETcc  
+		case 0xFE:
+			Exec_Group4(ctx, d_ctx); break; // Group 4 (INC/DEC Eb)
+		case 0xFF:
+			jumped = Exec_Group5(ctx, d_ctx); break; // Group 5 (CALL/JMP/PUSH Ev)
 
 		default:
 			printf("Unimplemented: 0x%02X\n", d_ctx->opcode);
@@ -456,7 +510,15 @@ void UpdateEFLAGS(CPU_Context* ctx, uint32_t res, uint32_t dest, uint32_t src, i
 		ctx->EFLAGS.OF = ((dest ^ src) & (dest ^ res) & sign_mask) != 0;
 		// AF (Adjust): Bit 3 借位
 		ctx->EFLAGS.AF = ((dest ^ res ^ truncated_res) & 0x10) != 0;
-		
+	}
+	else if(op == ALU_INC){
+		// INC 不更新 CF
+		ctx->EFLAGS.OF = ((dest ^ truncated_res) & (src ^ truncated_res) & sign_mask) != 0;
+		ctx->EFLAGS.AF = (dest ^ src ^ truncated_res) & 0x10 != 0;
+	}else if(op == ALU_DEC){
+		// DEC 不更新 CF
+		ctx->EFLAGS.OF = ((dest ^ src) & (dest ^ res) & sign_mask) != 0;
+		ctx->EFLAGS.AF = ((dest ^ res ^ truncated_res) & 0x10) != 0;
 	}
 
 }
@@ -523,6 +585,8 @@ void Exec_ALU_Generic(CPU_Context* ctx, DecodeContext* d_ctx, ALU_Op op, bool is
 		case ALU_AND: res = dest & src; break;
 		case ALU_CMP: case ALU_SUB:res = dest - src; break;
 		case ALU_XOR: res = dest ^ src; break;
+		case ALU_INC: res = dest + 1; break;
+		case ALU_DEC: res = dest - 1; break;
 	}
 	// 3.1.在更新标志位前，先拿到截断后的结果
 	uint32_t truncated_res = res & mask_d;
@@ -588,7 +652,7 @@ void Exec_POP(CPU_Context* ctx, DecodeContext* d_ctx) {
 }
 
 // 检查条件跳转是否成立 (Jcc)
-// condition_code: 输入指令码，取指令 Opcode 的低 4 位 (0x70-0x7F 或 0x80-0x8F 的低位)
+// condition_code: 输入指令码，取指令 Opcode 的低 4 位 (0x70-0x7F 或 0x80-0x8F 的低位)，还可以处理类似的逻辑，比如CMOV,SETcc等
 bool CheckCondition(CPU_Context* ctx, uint8_t condition_code) {
 	switch (condition_code & 0xF) {
 		case 0x0: return ctx->EFLAGS.OF == 1;          // JO
@@ -661,7 +725,7 @@ void Exec_DEC(CPU_Context* ctx, DecodeContext* d_ctx) {
 	int reg = d_ctx->opcode - 0x48;
 	uint32_t val = ReadGPR(ctx, reg, 32);
 	uint32_t res = val - 1;
-	UpdateEFLAGS(ctx, res, val, 1, 32, ALU_SUB);
+	UpdateEFLAGS(ctx, res, val, 1, 32, ALU_DEC);
 	WriteGPR(ctx, reg, 32, res);
 }
 
@@ -669,7 +733,7 @@ void Exec_INC(CPU_Context* ctx, DecodeContext* d_ctx){
 	int reg = d_ctx->opcode - 0x40;
 uint32_t val = ReadGPR(ctx,reg,32);
 	uint32_t res = val + 1;
-	UpdateEFLAGS(ctx, res, val, 1, 32, ALU_ADD);
+	UpdateEFLAGS(ctx, res, val, 1, 32, ALU_INC);
 	WriteGPR(ctx, reg, 32, res);
 }
 
@@ -1239,3 +1303,148 @@ void Exec_ENTER(CPU_Context* ctx, DecodeContext* d_ctx) {
 	ctx->ESP.I32 -= size;
 
 }
+
+// 处理 Group 4 (0xFE): 只有 INC Eb / DEC Eb
+void Exec_Group4(CPU_Context* ctx, DecodeContext* d_ctx) {
+	uint32_t val = GetOperandValue(ctx, d_ctx, 0);
+	switch (d_ctx->reg) {
+		case 0: // INC Eb
+			Exec_ALU_Generic(ctx, d_ctx, ALU_INC, false);break;
+		case 1: // DEC Eb
+			Exec_ALU_Generic(ctx, d_ctx, ALU_DEC, false);break;
+		default:
+			printf("[Error] Group 4 unknown reg: %d (Only 0/1 defined)\n", d_ctx->reg);break;
+	}
+}
+
+// 处理 Group 5 (0xFF): INC/DEC/CALL/JMP/PUSH
+bool Exec_Group5(CPU_Context* ctx, DecodeContext* d_ctx) {
+	// 获取操作数 (目标地址或要操作的值)
+	// 注意：对于 CALL/JMP，Op1 (Ev) 是存放"目标地址"的容器
+	uint32_t val = GetOperandValue(ctx, d_ctx, 0);
+	bool jumped = false;
+	switch (d_ctx->reg) {
+		case 0: // INC Ev
+			Exec_ALU_Generic(ctx, d_ctx, ALU_INC, false); break;
+		case 1: // DEC Ev
+			Exec_ALU_Generic(ctx, d_ctx, ALU_DEC, false); break;
+		case 2: {// CALL Ev(绝对间接调用)
+			uint32_t retaddr = ctx->EIP + d_ctx->instr_len;// 1. 压入返回地址 (当前 EIP + 指令长度)
+			ctx->ESP.I32 -= 4;
+			MemWrite(ctx->ESP.I32,retaddr,4); // 2. 跳转到绝对地址 (val 就是目标地址)
+			ctx->EIP = val;// 注意：外层需要知道发生了跳转
+			jumped = true;
+			break;
+		}
+		case 3: // CALL Mp (Far Call) - 暂时不支持保护模式跨段
+			printf("[Warning] CALL FAR not supported yet.\n");
+			break;
+		case 4: {// JMP Ev (绝对间接跳转)
+			ctx->EIP = val; // 直接跳转到目标地址
+			jumped = true;
+			break;
+		}
+		case 5: // JMP Mp (Far Jump) - 暂时不支持保护模式跨段
+			printf("[Warning] JMP FAR not supported yet.\n");
+			break;
+		case 6: // PUSH Ev
+			ctx->ESP.I32 -= 4;
+			MemWrite(ctx->ESP.I32, val,4);
+			break;
+		default:
+			printf("[Error] Group 5 unknown reg: %d\n", d_ctx->reg);
+			break;
+	}
+	return jumped;
+}
+
+// MOVZX: Zero Extend (零扩展)
+// src_bits: 源操作数位数 (8 或 16)
+void Exec_MOVZX(CPU_Context* ctx, DecodeContext* d_ctx, int src_bits) {
+	uint32_t val = GetOperandValue(ctx, d_ctx, 1); // 源操作数在 Op2
+	// 强制截断高位，确保高位为0
+	if (src_bits == 8) val &= 0xFF;
+	else if(src_bits ==16) val &= 0xFFFF;
+	// 写入 Op1 (通常是 32位寄存器)
+	SetOperandValue(ctx, d_ctx, 0, val);
+
+}
+
+// MOVSX: Sign Extend (符号扩展)
+void Exec_MOVSX(CPU_Context* ctx, DecodeContext* d_ctx, int src_bits) {
+	uint32_t val = GetOperandValue(ctx, d_ctx, 1); // 源操作数在 Op2
+	int32_t res = 0;
+	// 符号扩展
+	if (src_bits == 8) res = (int32_t)(int8_t)val;// 先转为 int8_t 截断并保留符号，再转为 int32_t 触发符号扩展
+	else if (src_bits == 16) res = (int32_t)(int8_t)val; //利用 C 语言的有符号类型转换特性来实现符号扩展
+	SetOperandValue(ctx, d_ctx, 0, (uint32_t)res);
+}
+
+// SETcc Eb
+void Exec_SETcc(CPU_Context* ctx, DecodeContext* d_ctx) {
+	  bool match = CheckCondition(ctx, d_ctx->opcode);
+	  // SETcc 只写入 1 个字节 (Eb)
+	  SetOperandValue(ctx, d_ctx, 0, match ? 1 : 0);
+}
+
+void Exec_CMOVcc(CPU_Context* ctx, DecodeContext* d_ctx) {
+	bool match = CheckCondition(ctx, d_ctx->opcode); //检查条件
+	if (match) {// 条件成立：执行传送
+		uint32_t val = GetOperandValue(ctx, d_ctx, 1); //获取源操作数
+		SetOperandValue(ctx, d_ctx, 0, val); //写入目的操作数
+	}
+	// 条件不成立：什么都不做 (NOP)
+}
+
+// IMUL Gv, Ev (0x0F AF)
+// 有符号乘法，双操作数版本：Dest = Dest * Src
+void Exec_IMUL_2_Op(CPU_Context* ctx, DecodeContext* d_ctx) {
+	// 1. 确定位宽 (16 或 32)
+	int size = (d_ctx->pfx_op_size == 0x66) ? 16 : 32;
+
+	// 2. 读取操作数
+	// Op1 是 Dest (Gv), Op2 是 Src (Ev)
+	// 注意：GetOperandValue 会自动处理寄存器或内存读取
+	uint32_t val_dest = GetOperandValue(ctx, d_ctx, 0);
+	uint32_t val_src = GetOperandValue(ctx, d_ctx, 1);
+
+	// 3. 执行运算与标志位计算
+	if (size == 16) {
+		int16_t d = (int16_t)val_dest;
+		int16_t s = (int16_t)val_src;
+		int32_t res = d * s; // 用更大一级类型计算以检测溢出
+
+		// 写入结果 (截断回 16 位)
+		SetOperandValue(ctx, d_ctx, 0, (uint16_t)res);
+
+		// 更新 CF/OF
+		// 规则：如果乘积结果超出了目标大小(16位)能表示的范围，CF=OF=1
+		// 检查方法：看 res 是否等于 res 强转回 int16 再转回 int32 的值
+		if (res != (int32_t)(int16_t)res) {
+			ctx->EFLAGS.CF = ctx->EFLAGS.OF = 1;
+		}
+		else {
+			ctx->EFLAGS.CF = ctx->EFLAGS.OF = 0;
+		}
+	}
+	else { // 32-bit
+		int32_t d = (int32_t)val_dest;
+		int32_t s = (int32_t)val_src;
+		int64_t res = (int64_t)d * (int64_t)s;
+
+		// 写入结果 (截断回 32 位)
+		SetOperandValue(ctx, d_ctx, 0, (uint32_t)res);
+
+		// 更新 CF/OF
+		if (res != (int64_t)(int32_t)res) {
+			ctx->EFLAGS.CF = ctx->EFLAGS.OF = 1;
+		}
+		else {
+			ctx->EFLAGS.CF = ctx->EFLAGS.OF = 0;
+		}
+	}
+
+	// SF, ZF, AF, PF 在 IMUL 中是未定义的 (Undefined)，我们通常保持不变或随意。
+	// 为了简单，我们不更新这些标志位。
+}
+

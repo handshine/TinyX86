@@ -101,7 +101,9 @@ typedef enum {
 	ALU_AND,
 	ALU_SUB,
 	ALU_XOR,
-	ALU_CMP
+	ALU_CMP,
+	ALU_INC,
+	ALU_DEC
 } ALU_Op;
 // 计算奇偶性 (Parity Flag) - 仅检查低8位
 // Intel 手册规定的硬件行为：无论你进行的是 8 位、16 位、32 位还是 64 位运算，奇偶校验位（PF）始终只关注结果的最低 8 位（LSB）。
@@ -130,7 +132,7 @@ void Exec_PUSH(CPU_Context* ctx, DecodeContext* d_ctx);
 // POP r32
 void Exec_POP(CPU_Context* ctx, DecodeContext* d_ctx);
 // 检查条件跳转是否成立 (Jcc)
-// condition_code: 指令 Opcode 的低 4 位 (0x70-0x7F 或 0x80-0x8F 的低位)
+// condition_code: 指令 Opcode 的低 4 位 (0x70-0x7F 或 0x80-0x8F 的低位),还可以处理类似的逻辑，比如CMOV,SETcc等
 bool CheckCondition(CPU_Context* ctx, uint8_t condition_code);
 // 处理相对跳转 (JMP, Jcc, CALL)
 // 返回 true 表示跳转发生
@@ -185,3 +187,21 @@ void Exec_LEAVE(CPU_Context* ctx);
 // ENTER (0xC8): 建立栈帧
 // 指令格式: ENTER size(16), level(8)
 void Exec_ENTER(CPU_Context* ctx, DecodeContext* d_ctx);
+
+// 处理 Group 4 (0xFE): 只有 INC Eb / DEC Eb
+void Exec_Group4(CPU_Context* ctx, DecodeContext* d_ctx);
+// 处理 Group 5 (0xFF): INC/DEC/CALL/JMP/PUSH,返回1发生跳转，0未发生跳转
+bool Exec_Group5(CPU_Context* ctx, DecodeContext* d_ctx);
+// MOVZX: Zero Extend (零扩展)
+// src_bits: 源操作数位数 (8 或 16)
+void Exec_MOVZX(CPU_Context* ctx, DecodeContext* d_ctx, int src_bits);
+// MOVSX: Sign Extend (符号扩展)
+void Exec_MOVSX(CPU_Context* ctx, DecodeContext* d_ctx, int src_bits);
+// SETcc Eb
+void Exec_SETcc(CPU_Context* ctx, DecodeContext* d_ctx);
+// CMOVcc Gv, Ev (0x0F 40 - 0x0F 4F)
+// 根据条件传送数据。条件码由 Opcode 低 4 位决定。
+void Exec_CMOVcc(CPU_Context* ctx, DecodeContext* d_ctx);
+// IMUL Gv, Ev (0x0F AF)
+// 有符号乘法，双操作数版本：Dest = Dest * Src
+void Exec_IMUL_2_Op(CPU_Context* ctx, DecodeContext* d_ctx);
