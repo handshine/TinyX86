@@ -62,6 +62,8 @@ typedef struct {
 		};
 	};
 
+	// 新增：CPU 状态标记
+	bool Halted;
 }CPU_Context;
 
 int runcpu(CPU_Context* p, int step);
@@ -208,3 +210,9 @@ void Exec_IMUL_2_Op(CPU_Context* ctx, DecodeContext* d_ctx);
 
 // 处理 0x98 (CBW/CWDE) 和 0x99 (CWD/CDQ)
 void Exec_SignExtend(CPU_Context* ctx, DecodeContext* d_ctx);
+
+// 处理 INT n (0xCD) 和 INT 3 (0xCC)
+// 我们将在这里通过 HLE (高层模拟) 拦截系统调用
+void Exec_INT(CPU_Context* ctx, DecodeContext* d_ctx);
+// LOOP 指令 (0xE0-E2), 返回0未发生跳转，1发生跳转
+bool Exec_LOOP(CPU_Context* ctx, DecodeContext* d_ctx);

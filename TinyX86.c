@@ -10,6 +10,11 @@ int runcpu(CPU_Context* p, int step)
 	DecodeContext d_ctx;
 	int instr_len = 0;
 	for (int i = 0; i < step; i++) {
+		// 0.【新增】检查是否停机
+		if(p->Halted) {
+			printf("[System] CPU Halted.\n");
+			break;
+		}
 		// 1. 取指与解码 (Fetch & Decode)
 		// 直接读取宿主内存地址 p->EIP
 		instr_len = ParseInstuction((uint8_t*)p->EIP, p->EIP, &d_ctx);
@@ -25,7 +30,7 @@ int runcpu(CPU_Context* p, int step)
 		// 仅当没有发生跳转时，才推进 EIP
 		if (!jumped) p->EIP += instr_len;
 		// 调试打印 (可选，用于观察 Sprint 1 效果)
-		printf("[Trace] EIP=0x%08X | Instr: %s | Len: %d\n", p->EIP, d_ctx.asm_str, instr_len);
+		//printf("[Trace] EIP=0x%08X | Instr: %s | Len: %d\n", p->EIP, d_ctx.asm_str, instr_len);
 
 	}
 	return 0;
@@ -282,6 +287,25 @@ bool ExecuteInstruction(CPU_Context* ctx, DecodeContext* d_ctx) {
 		case 0x98: // CBW / CWDE
 		case 0x99: // CWD / CDQ
 			Exec_SignExtend(ctx, d_ctx);break;
+		//sprint10
+		// --- Interrupts ---
+		case 0xCC: // INT 3
+		case 0xCD: // INT Ib
+			Exec_INT(ctx, d_ctx);break;
+		// --- LOOP ---
+		case 0xE0: case 0xE1: case 0xE2: // LOOPxx Jb
+			jumped = Exec_LOOP(ctx, d_ctx);// 这里的 offset 逻辑和 Jcc 类似，Exec_LOOP 内部已处理 EIP
+			break;
+		// --- JCXZ / JECXZ (0xE3) ---
+		// 既然做了 LOOP，顺便把这个也做了吧，它检测 ECX 是否为 0
+		case 0xE3:
+
+			if (ctx->ECX.I32 == 0) {
+				int8_t offset = (int8_t)d_ctx->imm;
+				ctx->EIP += d_ctx->instr_len + offset;
+				jumped =true;
+			}
+			break;
 
 		default:
 			printf("Unimplemented: 0x%02X\n", d_ctx->opcode);
@@ -1529,3 +1553,93 @@ void Exec_SignExtend(CPU_Context* ctx, DecodeContext* d_ctx) {
 	}
 }
 
+// 处理 INT n (0xCD) 和 INT 3 (0xCC)
+// 我们将在这里通过 HLE (高层模拟) 拦截系统调用
+void Exec_INT(CPU_Context* ctx, DecodeContext* d_ctx) {
+	uint8_t int_num = 0;
+	// 区分 INT 3 (0xCC) 和 INT n (0xCD imm8)
+	if (d_ctx->opcode == 0xCC) {
+		int_num = 3;
+	}
+	else{
+		int_num = (uint8_t)d_ctx->imm;
+	}
+	// --- High Level Emulation (HLE) 拦截 ---
+	// 我们没有真实的内核，所以在这里用 C 代码模拟操作系统行为
+
+	if (int_num == 0x21) {
+		// [DOS API 模拟]
+		// AH = 0x02: 输出字符 (DL = 字符)
+		// AH = 0x09: 输出字符串 (DS:DX = 字符串, '$' 结尾)
+		// AH = 0x4C: 退出程序
+		uint8_t ah = ctx->EAX.I8.H;
+		switch (ah) {
+			case 0x02: {// PutChar
+				putchar(ctx->EDX.I8.L);
+				fflush(stdout);
+				break;
+			}
+			case 0x09: {// PutString
+				// DOS 字符串以 '$' 结束
+				// 获取物理地址: DS << 4 + DX (实模式) 或者 DS base + EDX (保护模式)
+				// 简单起见，我们假设是 Flat Model，直接用 EDX
+				uint32_t addr = ctx->EDX.I32;
+				char ch = MemRead(addr, 1);
+				while (ch != '$' && ch != 0) {// 防御性：遇到 0 也停
+					putchar(ch);
+					addr++;
+					ch = MemRead(addr, 1);
+				}
+				break;
+			}
+			case 0x4c: {// Exit
+				uint8_t exit_code = ctx->EAX.I8.L;
+				printf("\n[Program exited with code %d]\n", exit_code);
+				exit(exit_code);
+				break;
+			}
+			default:
+				printf("[TinyX86] Unhandled INT 21h service: AH=0x%02X\n", ah); 
+				break;
+		}
+	}
+	else if (int_num == 3) {
+		printf("\n[TinyX86] Breakpoint Hit (INT 3) at EIP=0x%08X\n", ctx->EIP);
+		// 在调试器中，这里会暂停 CPU 循环,设置停止标记
+		ctx->Halted = true;
+	}
+	else
+	{
+		printf("[TinyX86] Unhandled Interrupt: 0x%02X\n", int_num);
+	}
+}
+
+bool Exec_LOOP(CPU_Context* ctx, DecodeContext* d_ctx) {
+	// 1. 递减计数器 (ECX/CX)
+	// 根据地址大小前缀 (0x67) 判断是使用 ECX 还是 CX
+	bool condition = false;
+	uint32_t counter;
+	if (d_ctx->pfx_addr_size == 0x67) {
+		 counter = --(ctx->ECX.I16);
+	}
+	else {
+		counter = --(ctx->ECX.I32);
+	}
+	// 2. 检查条件
+	bool counter_not_zero = (counter != 0);
+	if (d_ctx->opcode == 0xE2) { // LOOP
+		condition = counter_not_zero;
+	}
+	else if (d_ctx->opcode == 0xE1) {// LOOPE / LOOPZ
+		condition = counter_not_zero && (ctx->EFLAGS.ZF == 1);
+	}
+	else if (d_ctx->opcode == 0xE0) {// LOOPNE / LOOPNZ
+		condition = counter_not_zero && (ctx->EFLAGS.ZF == 0);
+	}
+	// 3. 执行跳转
+	if (condition) {
+		ctx->EIP += d_ctx->disp_len +(int8_t)d_ctx->imm; // 有符号偏移
+		return true;
+	}
+	return false;
+}

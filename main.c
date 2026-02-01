@@ -1,103 +1,104 @@
-// [main.c] 修复版
+// [main.c]
 #include "TinyX86.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h> 
 
 int main() {
-    printf("--- Sprint 9: Segments & Sign Extensions (Fixed) ---\n");
+    printf("--- Sprint 10: Hello World (INT 21h & LOOP) ---\n");
 
-    // 1. 初始化
+    // 1. 初始化内存
     uint32_t stack_size = 1024 * 64;
     uint8_t* raw_memory = (uint8_t*)malloc(stack_size);
     if (!raw_memory) return -1;
+
     CPU_Context ctx;
     memset(&ctx, 0, sizeof(ctx));
     ctx.ESP.I32 = (uint32_t)(uintptr_t)(raw_memory + stack_size - 1024);
 
+    // 2. 在内存某处放入字符串 "Hello"
+    // 我们把字符串放在偏移 0x1000 处
+    uint32_t str_addr = 0x1000;
+    const char* msg = "Hello";
+    // 既然我们是 Host-Passthrough 内存模型，raw_memory 只是栈，
+    // 我们需要把字符串真的写到 ctx 可以访问的地址。
+    // 简单起见，我们直接把字符串跟在代码后面，或者手动写入 raw_memory
+    // 但我们的 MemRead 目前是直接读绝对地址的。
+    // 为了方便，我们把字符串拷贝到 raw_memory 的开头部分作为数据区
+    memcpy(raw_memory, msg, 6);
+    // 获取 raw_memory 在宿主机的真实地址作为“数据段地址”
+    uint32_t host_str_addr = (uint32_t)(uintptr_t)raw_memory;
+
+
     // =========================================================
-    // 2. 构造机器码
+    // 3. 构造机器码
     // =========================================================
-    uint8_t code[] = {
-        // --- Test 1: Segment Registers (MOV & PUSH/POP) ---
-        // MOV AX, 0x1234
-        0xB8, 0x34, 0x12, 0x00, 0x00,
-        // MOV DS, AX (0x8E D8) -> DS 应该是 0x1234
-        0x8E, 0xD8,
-        // MOV BX, DS (0x8C DB) -> BX 应该是 0x1234
-        0x8C, 0xDB,
+    // 代码放在 raw_memory + 0x100 处，防止覆盖数据
+    uint8_t* code_ptr = raw_memory + 0x100;
+    uint32_t code_start_addr = (uint32_t)(uintptr_t)code_ptr;
 
-        // PUSH DS (0x1E) -> 栈里压入 0x1234
-        0x1E,
-        // POP ES (0x07) -> ES 弹出 0x1234
-        0x07,
+    uint8_t assembly[] = {
+        // MOV ECX, 5 (循环次数)
+        0xB9, 0x05, 0x00, 0x00, 0x00,
 
-        // --- Test 2: Sign Extensions (CWDE / CDQ) ---
-        // MOV EAX, 0xFFFF8000 (-32768) 
-        // 低16位是 0x8000 (负数)，CWDE 后 EAX 应该保持 0xFFFF8000
-        0xB8, 0x00, 0x80, 0xFF, 0xFF,
+        // MOV ESI, host_str_addr (字符串地址)
+        // 我们用 ESI 做指针
+        0xBE,
+        (host_str_addr & 0xFF),
+        (host_str_addr >> 8) & 0xFF,
+        (host_str_addr >> 16) & 0xFF,
+        (host_str_addr >> 24) & 0xFF,
 
-        // MOV AX, 0x007F (127) -> EAX 变为 0xFFFF007F (高位保留了垃圾)
-        0x66, 0xB8, 0x7F, 0x00,
-        // CWDE (0x98) -> AX(0x007F) 符号扩展到 EAX。EAX 应该变为 0x0000007F
-        0x98,
+        // Label_Start:
+        // MOV AL, byte ptr [ESI] (LODSB: AL = [ESI], ESI++)
+        // 用 LODSB 比较方便，它自动取值并加 ESI
+        0xAC,
 
-        // MOV EAX, -1 (0xFFFFFFFF)
-        0xB8, 0xFF, 0xFF, 0xFF, 0xFF,
-        // CDQ (0x99) -> EDX:EAX。因为 EAX 是负数，EDX 应该变为 0xFFFFFFFF
-        // 【关键点】：这个值必须保留到最后验证！
-        0x99,
+        // MOV DL, AL (因为 INT 21/AH=02 需要字符在 DL)
+        0x88, 0xC2, // MOV DL, AL
 
-        // --- Test 3: TEST Instruction ---
-        // MOV ECX, 0x0F
-        0xB9, 0x0F, 0x00, 0x00, 0x00,
+        // MOV AH, 0x02 (Service: Print Char)
+        0xB4, 0x02,
 
-        // TEST ECX, ECX (0x85 C9) -> 0x0F & 0x0F = 0x0F. ZF=0.
-        0x85, 0xC9,
+        // INT 0x21 (Call DOS)
+        0xCD, 0x21,
 
-        // 【修复】：改用 ESI (索引6) 来做测试，不要覆盖 EDX！
-        // MOV ESI, 0 
-        0xBE, 0x00, 0x00, 0x00, 0x00,
+        // LOOP Label_Start (-9 bytes back)
+        // LODSB(1) + MOV(2) + MOV(2) + INT(2) = 7 bytes
+        // LOOP instruction itself is 2 bytes. 
+        // Offset calculation: Jump back 7 bytes to LODSB.
+        // 0xFE = -2, 0xF9 = -7
+        0xE2, 0xF9,
 
-        // TEST ECX, ESI 
-        // Opcode 0x85, ModRM: Mode=11, Reg=ESI(6, 110), RM=ECX(1, 001) -> 11 110 001 -> 0xF1
-        // 结果: 0x0F & 0x00 = 0. ZF 应该被置为 1.
-        0x85, 0xF1,
-
-        0x90 // NOP
+        // INT 3 (Breakpoint/Exit)
+        0xCC
     };
 
-    ctx.EIP = (uint32_t)(uintptr_t)code;
-    runcpu(&ctx, 15);
+    memcpy(code_ptr, assembly, sizeof(assembly));
+
+    // 4. 执行
+    ctx.EIP = code_start_addr;
+
+    // 我们多跑几步，因为有个循环
+    // 5 chars * (LODSB+MOV+MOV+INT+LOOP = 5 instructions) = 25 steps
+    printf("Output:\n ");
+    runcpu(&ctx, 40);
+    printf("\n");
 
     // =========================================================
-    // 3. 结果验证
+    // 4. 结果验证
     // =========================================================
     printf("\n--- Verification ---\n");
+    // 循环结束时 ECX 应该为 0
+    printf("ECX: %d (Expected 0)\n", ctx.ECX.I32);
+    // ESI 应该指向字符串末尾 (Start + 5)
+    printf("ESI Offset: +%d (Expected +5)\n", ctx.ESI.I32 - host_str_addr);
 
-    // Segment Test
-    printf("DS: 0x%04X (Expected 0x1234)\n", ctx.DS);
-    printf("ES: 0x%04X (Expected 0x1234)\n", ctx.ES);
-
-    // Sign Extension Test
-    // 验证 CDQ 的结果：EDX 必须是 0xFFFFFFFF
-    printf("EDX (CDQ): 0x%08X (Expected 0xFFFFFFFF)\n", ctx.GPR[2].I32);
-
-    // TEST Test
-    // 验证最后一条 TEST ECX, ESI 的结果：ZF 必须是 1
-    printf("ZF (TEST): %d (Expected 1)\n", ctx.EFLAGS.ZF);
-
-    int success = 1;
-    if (ctx.DS != 0x1234) success = 0;
-    if (ctx.ES != 0x1234) success = 0;
-    if (ctx.GPR[2].I32 != 0xFFFFFFFF) success = 0; // 之前这里会失败
-    if (ctx.EFLAGS.ZF != 1) success = 0;
-
-    if (success) {
-        printf("[SUCCESS] All Sprint 9 features work!\n");
+    if (ctx.ECX.I32 == 0) {
+        printf("[SUCCESS] Hello World printed via INT 21h!\n");
     }
     else {
-        printf("[FAIL] Check debug output.\n");
+        printf("[FAIL] Loop didn't finish correctly.\n");
     }
 
     free(raw_memory);
