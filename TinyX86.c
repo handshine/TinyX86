@@ -65,6 +65,13 @@ bool ExecuteInstruction(CPU_Context* ctx, DecodeContext* d_ctx) {
 			case 0x9C: case 0x9D: case 0x9E: case 0x9F:
 				Exec_SETcc(ctx, d_ctx);break;
 
+				// --- FS/GS PUSH/POP (0x0F A0 - 0x0F A9) ---
+						// 这里的 opcode 来自 two_byte_opcode_table
+			case 0xA0: case 0xA8: // PUSH FS, PUSH GS
+				Exec_PUSH(ctx, d_ctx);break;
+			case 0xA1: case 0xA9: // POP FS, POP GS
+				Exec_POP(ctx, d_ctx);break;
+
 		
 			// --- IMUL (双操作数 Gv, Ev) ---
 			case 0xAF:
@@ -124,7 +131,8 @@ bool ExecuteInstruction(CPU_Context* ctx, DecodeContext* d_ctx) {
 			Exec_PUSH(ctx, d_ctx);
 			break;
 		case 0x58: case 0x59: case 0x5A: case 0x5B: case 0x5C: case 0x5D: case 0x5E: case 0x5F: // POP r32
-		case 0x07: case 0x1F: // POP Seg
+		case 0x07: case 0x17: // [修复] 补全 POP SS
+		case 0x1F: // POP Seg
 			Exec_POP(ctx, d_ctx);
 			break;
 
@@ -159,14 +167,20 @@ bool ExecuteInstruction(CPU_Context* ctx, DecodeContext* d_ctx) {
 			// Sprint 4 简化起见，先假设我们只处理 0x7x 系列短跳转。
 
 
-			// MOV (上一轮实现的)
+		// --- MOV 家族 (完善) ---
+		// 0x88-0x8B: Generic MOV (Gv,Ev / Ev,Gv...) - 之前已存在
+		// 0x8C: MOV Ew, Sw (Segment -> Reg/Mem)
+		// 0x8E: MOV Sw, Ew (Reg/Mem -> Segment)
+		// 因为我们在 Get/SetOperandValue 里实现了 Sw，这里直接复用通用逻辑！
 		case 0x88: case 0x89: case 0x8A: case 0x8B:
+		case 0x8C:          // 新增: MOV r/m, seg
+		case 0x8E:          // 新增: MOV seg, r/m
 		case 0xB0: case 0xB1: case 0xB2: case 0xB3:
 		case 0xB4: case 0xB5: case 0xB6: case 0xB7:
 		case 0xB8: case 0xB9: case 0xBA: case 0xBB:
 		case 0xBC: case 0xBD: case 0xBE: case 0xBF:
-		case 0xC6: case 0xC7: 
-			Exec_MOV_Reg_Imm(ctx, d_ctx); break;// 建议改名为更通用的 Exec_MOV
+		case 0xC6: case 0xC7:
+			Exec_MOV_Generic(ctx, d_ctx); break;
 
 		case 0xA0: // MOV AL, moffs8
 			// 指令格式：A0 [offset32]
@@ -257,6 +271,17 @@ bool ExecuteInstruction(CPU_Context* ctx, DecodeContext* d_ctx) {
 			Exec_Group4(ctx, d_ctx); break; // Group 4 (INC/DEC Eb)
 		case 0xFF:
 			jumped = Exec_Group5(ctx, d_ctx); break; // Group 5 (CALL/JMP/PUSH Ev)
+		//sprint9
+
+		// --- TEST (0x84, 0x85) ---
+		// 0xF6/0xF7 的 TEST 已经在 Group3 处理了，这里处理单独的 opcode
+		case 0x84: case 0x85:
+				Exec_ALU_Generic(ctx, d_ctx, ALU_AND,true); break;// true 表示不写回
+
+		// --- 符号扩展 (0x98, 0x99) ---
+		case 0x98: // CBW / CWDE
+		case 0x99: // CWD / CDQ
+			Exec_SignExtend(ctx, d_ctx);break;
 
 		default:
 			printf("Unimplemented: 0x%02X\n", d_ctx->opcode);
@@ -359,6 +384,22 @@ uint32_t GetOperandValue(CPU_Context* ctx, DecodeContext* d_ctx, int op_idx) {
 		case OP_rSI: return ReadGPR(ctx, 6, op_size);
 		case OP_rDI: return ReadGPR(ctx, 7, op_size);
 
+		// --- 段寄存器 (Sw: from ModRM.reg) ---
+		case Sw:
+			// ctx->seg 数组顺序: ES=0, CS=1, SS=2, DS=3, FS=4, GS=5
+			// d_ctx->reg 刚好对应这个索引 (0-5)
+			if (d_ctx->reg < 6) return ctx->seg[d_ctx->reg];
+			return 0;
+
+		// --- 硬编码段寄存器 (OP_ES ... OP_GS) ---
+		case OP_ES: return ctx->ES;
+		case OP_CS: return ctx->CS;
+		case OP_SS: return ctx->SS;
+		case OP_DS: return ctx->DS;
+		case OP_FS: return ctx->FS;
+		case OP_GS: return ctx->GS;
+		
+
 		// --- 内存/寄存器 (ModR/M) ---
 		case Eb:
 		case Ew:
@@ -430,11 +471,24 @@ void SetOperandValue(CPU_Context* ctx, DecodeContext* d_ctx, int op_idx, uint32_
 		case OP_rBP: WriteGPR(ctx, 5, op_size, value); break;
 		case OP_rSI: WriteGPR(ctx, 6, op_size, value); break;
 		case OP_rDI: WriteGPR(ctx, 7, op_size, value); break;
+			// --- 段寄存器 (Sw) ---
+		case Sw:
+			if (d_ctx->reg < 6) ctx->seg[d_ctx->reg] = (uint16_t)value;
+			break;
+
+			// --- 硬编码段寄存器 ---
+			// 注意：CS 通常不能直接 MOV 修改，但 PUSH/POP 可能涉及到，模拟器为了简单先允许写
+		case OP_ES: ctx->ES = (uint16_t)value; break;
+		case OP_CS: ctx->CS = (uint16_t)value; break; // 警告：真实CPU改CS通常需要JMP FAR
+		case OP_SS: ctx->SS = (uint16_t)value; break;
+		case OP_DS: ctx->DS = (uint16_t)value; break;
+		case OP_FS: ctx->FS = (uint16_t)value; break;
+		case OP_GS: ctx->GS = (uint16_t)value; break;
 	}
 }
 
 // 处理 MOV r, i (0xB0 - 0xBF)
-void Exec_MOV_Reg_Imm(CPU_Context* ctx, DecodeContext* d_ctx) {
+void Exec_MOV_Generic(CPU_Context* ctx, DecodeContext* d_ctx) {
 	// 1. 读取源操作数 (OP2: Immediate)
 	uint32_t src = GetOperandValue(ctx, d_ctx, 1);
 	// 2. 写入目的操作数 (OP1: Register)
@@ -1443,8 +1497,35 @@ void Exec_IMUL_2_Op(CPU_Context* ctx, DecodeContext* d_ctx) {
 			ctx->EFLAGS.CF = ctx->EFLAGS.OF = 0;
 		}
 	}
-
 	// SF, ZF, AF, PF 在 IMUL 中是未定义的 (Undefined)，我们通常保持不变或随意。
 	// 为了简单，我们不更新这些标志位。
+}
+
+// 处理 0x98 (CBW/CWDE) 和 0x99 (CWD/CDQ)
+void Exec_SignExtend(CPU_Context* ctx, DecodeContext* d_ctx) {
+	int op_size = (d_ctx->pfx_op_size == 0x66) ? 16 : 32;
+
+	if (d_ctx->opcode == 0x98) {
+		if (op_size == 16) {
+			// CBW: AL (8) -> AX (16)
+			ctx->EAX.I16 = (int16_t)(int8_t)ctx->EAX.I8.L;
+		}
+		else {
+			// CWDE: AX (16) -> EAX (32)
+			ctx->EAX.I32 = (int32_t)(int16_t)ctx->EAX.I16;
+		}
+	}
+	else if (d_ctx->opcode == 0x99) {
+		if (op_size == 16) {
+			// CWD: AX -> DX:AX
+			if ((int16_t)ctx->EAX.I16 < 0) ctx->EDX.I16 = 0xFFFF;
+			else ctx->EDX.I16 = 0x0000;
+		}
+		else {
+			// CDQ: EAX -> EDX:EAX
+			if ((int32_t)ctx->EAX.I32 < 0) ctx->EDX.I32 = 0xFFFFFFFF;
+			else ctx->EDX.I32 = 0x0000;
+		}
+	}
 }
 

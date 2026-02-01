@@ -5,7 +5,7 @@
 
 typedef union {
 	DWORD I32;
-	DWORD I16;
+	WORD I16;
 	struct {
 		BYTE L;
 		BYTE H;
@@ -90,7 +90,7 @@ uint32_t GetOperandValue(CPU_Context* ctx, DecodeContext* d_ctx, int op_idx);
 // 写入操作数的值
 void SetOperandValue(CPU_Context* ctx, DecodeContext* d_ctx, int op_idx, uint32_t value);
 // 处理 MOV r32, imm32 (0xB8 - 0xBF)
-void Exec_MOV_Reg_Imm(CPU_Context* ctx, DecodeContext* d_ctx);
+void Exec_MOV_Generic(CPU_Context* ctx, DecodeContext* d_ctx);
 
 // 定义操作类型，用于标志位计算
 typedef enum {
@@ -205,3 +205,6 @@ void Exec_CMOVcc(CPU_Context* ctx, DecodeContext* d_ctx);
 // IMUL Gv, Ev (0x0F AF)
 // 有符号乘法，双操作数版本：Dest = Dest * Src
 void Exec_IMUL_2_Op(CPU_Context* ctx, DecodeContext* d_ctx);
+
+// 处理 0x98 (CBW/CWDE) 和 0x99 (CWD/CDQ)
+void Exec_SignExtend(CPU_Context* ctx, DecodeContext* d_ctx);
