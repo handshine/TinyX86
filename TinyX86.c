@@ -3,6 +3,7 @@
 
 #include "TinyX86.h"
 #include <stdio.h> // 用于printf调试
+#include <math.h> // 需要 math.h 支持 double 运算
 
 
 int runcpu(CPU_Context* p, int step)
@@ -30,7 +31,7 @@ int runcpu(CPU_Context* p, int step)
 		// 仅当没有发生跳转时，才推进 EIP
 		if (!jumped) p->EIP += instr_len;
 		// 调试打印 (可选，用于观察 Sprint 1 效果)
-		//printf("[Trace] EIP=0x%08X | Instr: %s | Len: %d\n", p->EIP, d_ctx.asm_str, instr_len);
+		printf("[Trace] EIP=0x%08X |  %s | Len: %d\n", p->EIP, d_ctx.asm_str, instr_len);
 
 	}
 	return 0;
@@ -278,9 +279,9 @@ bool ExecuteInstruction(CPU_Context* ctx, DecodeContext* d_ctx) {
 			jumped = Exec_Group5(ctx, d_ctx); break; // Group 5 (CALL/JMP/PUSH Ev)
 		//sprint9
 
-		// --- TEST (0x84, 0x85) ---
+		// --- TEST (0x84, 0x85,0xA8,0xA9) ---
 		// 0xF6/0xF7 的 TEST 已经在 Group3 处理了，这里处理单独的 opcode
-		case 0x84: case 0x85:
+		case 0x84: case 0x85: case 0xA8: case 0xA9:
 				Exec_ALU_Generic(ctx, d_ctx, ALU_AND,true); break;// true 表示不写回
 
 		// --- 符号扩展 (0x98, 0x99) ---
@@ -299,13 +300,24 @@ bool ExecuteInstruction(CPU_Context* ctx, DecodeContext* d_ctx) {
 		// --- JCXZ / JECXZ (0xE3) ---
 		// 既然做了 LOOP，顺便把这个也做了吧，它检测 ECX 是否为 0
 		case 0xE3:
-
 			if (ctx->ECX.I32 == 0) {
 				int8_t offset = (int8_t)d_ctx->imm;
 				ctx->EIP += d_ctx->instr_len + offset;
 				jumped =true;
 			}
 			break;
+		//********************************sprint11:FPU******************************************
+		case 0xD8: case 0xD9: case 0xDA: case 0xDB:
+		case 0xDC: case 0xDD: case 0xDE: case 0xDF:
+			Exec_FPU(ctx, d_ctx);
+			break;
+			// --- SAHF (0x9E) LAHF(0x9F)---
+		case 0x9E:
+			Exec_SAHF(ctx);break;
+		case 0x9F:
+
+
+
 
 		default:
 			printf("Unimplemented: 0x%02X\n", d_ctx->opcode);
@@ -1643,3 +1655,294 @@ bool Exec_LOOP(CPU_Context* ctx, DecodeContext* d_ctx) {
 	}
 	return false;
 }
+
+void FPU_PUSH(CPU_Context* ctx, double val) {
+	ctx->FPU.SW.TOP = (ctx->FPU.SW.TOP - 1) & 0x7; // TOP 环绕递减
+	ST(0) = val;
+}
+
+double FPU_POP(CPU_Context* ctx) {
+	double val = ST(0);
+	ctx->FPU.SW.TOP = (ctx->FPU.SW.TOP + 1) & 0x7; // TOP 环绕递增
+	return val;
+}
+
+double MemReadF(uint32_t addr, int size) {
+	if (size == 4) {//float也读成double
+		uint32_t raw =  MemRead(addr, 4);
+		return (double)(*(float*)&raw);
+	}
+	else { //double
+		uint32_t low = MemRead(addr, 4);
+		uint32_t high = MemRead(addr + 4, 4);
+		uint64_t raw = ((uint64_t)high << 32) | low;
+		return *(double*)&raw;
+	}
+}
+
+void MemWriteF(uint32_t addr, double val, int size) {
+	if (size == 4) {
+		float f = (float)val;
+		uint32_t raw = *(uint32_t*)&f;
+		MemWrite(addr, raw, 4);
+	} else {
+		uint64_t raw = *(uint64_t*)&val;
+		MemWrite(addr, (uint32_t)(raw & 0xFFFFFFFF), 4);
+		MemWrite(addr + 4, (uint32_t)(raw >> 32), 4);
+	}
+}
+
+void UpdateFPUFlags(CPU_Context* ctx, double v1, double v2) {
+	// 先清空相关标志
+	ctx->FPU.SW.C0 = 0;//CF
+	ctx->FPU.SW.C2 = 0;//非PF- isNaN？
+	ctx->FPU.SW.C3 = 0;//ZF
+
+	if (isnan(v1) | isnan(v2)) {//属于 C 语言的标准数学库 <math.h>的宏，判断是否无序NaN
+		ctx->FPU.SW.C0 = 1;
+		ctx->FPU.SW.C2 = 1;
+		ctx->FPU.SW.C3 = 1;
+	} else if (v1 > v2) {
+		//全0
+	} else if (v1 = v2) {
+		ctx->FPU.SW.C3 = 1;
+	} else if (v1 < v2) {
+		ctx->FPU.SW.C0 = 1;
+	}
+}
+
+void Exec_SAHF(CPU_Context* ctx) {
+	uint8_t ah = ctx->EAX.I8.H;
+	ctx->EFLAGS.SF = (ah >> 7) & 1;
+	ctx->EFLAGS.ZF = (ah >> 6) & 1;
+	ctx->EFLAGS.AF = (ah >> 4) & 1;
+	ctx->EFLAGS.PF = (ah >> 2) & 1;
+	ctx->EFLAGS.CF = (ah >> 0) & 1;
+}
+
+void Exec_LAHF(CPU_Context* ctx) {
+	// 初始化为 0x02，确保保留位 Bit 1 为 1
+	uint8_t ah = 0x02;
+	ah |= (ctx->EFLAGS.SF & 1) << 7;
+	ah |= (ctx->EFLAGS.ZF & 1) << 6;
+	ah |= (ctx->EFLAGS.AF & 1) << 4;
+	ah |= (ctx->EFLAGS.PF & 1) << 2;
+	ah |= (ctx->EFLAGS.CF & 1) << 0;
+	ctx->EAX.I8.H = ah;
+}
+
+// 读取整数内存 (int16/int32) -> double (处理 DA/DB/DE/DF)
+double MemReadI(uint32_t addr, int size) {
+	uint32_t raw = MemRead(addr, size);
+	if (size == 2) {
+		return (double)(int16_t)raw;    // 强转符号扩展
+	} else { // size == 4
+		return (double)(int32_t)raw;    // 强转符号扩展
+	}
+}
+
+// 写入整数内存 double -> (int16/int32) (处理 DB/DF)
+void MemWriteI(uint32_t addr, double val, int size) {
+	// 简单截断取整 (CVTTSD2SI 行为)
+	if (size == 2) {
+		int16_t i16 = (int16_t)val;
+		MemWrite(addr, (uint16_t)i16, 2);
+	} else { // size == 4
+		int32_t i32 = (int32_t)val;
+		MemWrite(addr, (uint32_t)i32, 4);
+	}
+}
+
+void Exec_FPU(CPU_Context* ctx, DecodeContext* d_ctx) {
+	uint8_t op_group = d_ctx->opcode;
+	uint8_t sub_op = d_ctx->reg;
+	bool is_mem = d_ctx->mod != 3;
+	// ==================================================
+	// 路径 A: 内存操作
+	// ==================================================
+	if (is_mem) {
+		uint32_t addr = GetEffectiveAddress(ctx, d_ctx);
+		// ------------------------------------------------
+		// Group 1: 算术运算 (D8, DC, DA, DE)
+		// 逻辑：ST0 = ST0 op [MEM]
+        // ------------------------------------------------
+		if (op_group == 0xD8 || op_group == 0xDA || op_group == 0xDC || op_group == 0xDE) {
+			double src = 0.0;
+			// 1. 根据指令组读取不同类型的源操作数
+			if (op_group == 0xD8) src = MemReadF(addr, 4); // float
+			else if (op_group == 0xDC) src = MemReadF(addr, 8); // double
+			else if (op_group == 0xDA) src = MemReadI(addr, 4); // int32 (FIADD...)
+			else if (op_group == 0xDE) src = MemReadI(addr, 2); // int16 (FIADD...)
+
+			double* dst = &ST(0);//直接指针修改ST值
+			// 2. 执行统一算术逻辑
+			switch (sub_op) {
+				case 0: *dst += src; break; // FADD / FIADD
+				case 1: *dst *= src; break; // FMUL / FIMUL
+				case 2: UpdateFPUFlags(ctx, *dst, src); break; // FCOM / FICOM
+				case 3: UpdateFPUFlags(ctx, *dst, src); FPU_POP(ctx); break; // FCOMP / FICOMP
+				case 4: *dst -= src; break; // FSUB / FISUB
+				case 5: *dst = src - *dst; break; // FSUBR / FISUBR
+				case 6: *dst /= src; break; // FDIV / FIDIV
+				case 7: *dst = src / *dst; break; // FDIVR / FIDIVR
+			}
+		}
+		// ------------------------------------------------
+		// Group 2: 数据传输 (D9, DD, DB, DF)
+		// 逻辑：Load / Store
+		// ------------------------------------------------
+		else {
+			int size = 0;
+			bool is_int = false;
+			// 确定基本类型和大小
+			if (op_group == 0xD9) { size = 4; }           // float
+			else if (op_group == 0xDD) { size = 8; }           // double
+			else if (op_group == 0xDB) { size = 4; is_int = true; } // int32
+			else if (op_group == 0xDF) { size = 2; is_int = true; } // int16 ，先简化处理再处理特殊值，不想深化下去了
+
+			switch (sub_op) {
+				case 0: {// FLD / FILD (Load)
+					if(is_int) FPU_PUSH(ctx,MemReadI(addr, size));
+					else       FPU_PUSH(ctx, MemReadF(addr, size));
+					break;
+				}
+				case 2: {// FST / FIST (Store)
+					if (is_int) MemWriteI(addr, ST(0), size);
+					else        MemWriteF(addr, ST(0), size);
+					break;
+				}
+				case 3: {// FSTP / FISTP (Store & Pop)
+					if (is_int) MemWriteI(addr, FPU_POP(ctx), size);
+					else        MemWriteF(addr, FPU_POP(ctx), size);
+					break;
+				}
+				case 5: {// 特殊: FILD m64 (DF /5) - 加载 64位整数
+					if (op_group == 0xDF) {
+						uint32_t low = MemRead(addr, 4);
+						uint32_t high = MemRead(addr + 4, 4);
+						int64_t val64 = ((int64_t)high << 32) | low;
+						FPU_PUSH(ctx, (double)val64);
+					} else if (op_group == 0xD9) {
+						// D9 /5: FLDCW (Load Control Word) - 适配 CW
+						// 直接读取内存到 Value 联合体成员
+						ctx->FPU.CW.Value = (uint16_t)MemRead(addr, 2);
+					}
+					break;
+				}
+				case 7: {// FISTP m64
+					if (op_group == 0xDF) {
+						int64_t val64 = (int64_t)FPU_POP(ctx);
+						MemWrite(addr, (uint32_t)(val64 & 0xFFFFFFFF), 4);
+						MemWrite(addr + 4, (uint32_t)(val64 >> 32), 4);
+					} else if (op_group == 0xD9) {
+						// D9 /7: FNSTCW (Store Control Word) - 适配 CW
+						MemWrite(addr, ctx->FPU.CW.Value, 2);
+					} else if (op_group == 0xDD) {
+						// DD /7: FSTSW (Store Status Word) - 适配 SW
+						MemWrite(addr, ctx->FPU.SW.Value, 2);
+					}
+					break;
+				}
+				default:
+					printf("[FPU] Unimpl Mem Op: %02X /%d\n", op_group, sub_op);
+					return;
+			}
+		}
+	} 
+	// ==================================================
+	// 路径 B: 寄存器操作
+	// ==================================================
+	else {
+		int i = d_ctx->rm; // ST(i)
+
+		// 1. D8: ST0 = ST0 op ST(i)
+		if (op_group == 0xD8) {
+			switch (sub_op) {
+				case 0: ST(0) += ST(i); break;
+				case 1: ST(0) *= ST(i); break;
+				case 2: UpdateFPUFlags(ctx, ST(0), ST(i)); break;
+				case 3: UpdateFPUFlags(ctx, ST(0), ST(i)); FPU_POP(ctx); break;
+				case 4: ST(0) -= ST(i); break;
+				case 5: ST(0) = ST(i) - ST(0); break;
+				case 6: ST(0) /= ST(i); break;
+				case 7: ST(0) = ST(i) / ST(0); break;
+			}
+		}
+		// 2. DC: ST(i) = ST(i) op ST(0)
+		else if (op_group == 0xDC) {
+			switch (sub_op) {
+				case 0: ST(i) += ST(0); break;
+				case 1: ST(i) *= ST(0); break;
+				case 4: ST(i) = ST(0) - ST(i); break;
+				case 5: ST(i) = ST(i) - ST(0); break;
+				case 6: ST(i) = ST(0) / ST(i); break;
+				case 7: ST(i) = ST(i) / ST(0); break;
+			}
+		}
+		// 3. DE: ST(i) = ST(i) op ST(0) 然后 POP
+		else if (op_group == 0xDE) {
+			switch (sub_op) {
+				case 0: ST(i) += ST(0); FPU_POP(ctx); break;
+				case 1: ST(i) *= ST(0); FPU_POP(ctx); break;
+				case 3: // DE D9: FCOMPP (特殊: 弹栈两次)
+					if (i == 1) {
+						UpdateFPUFlags(ctx, ST(0), ST(1));
+						FPU_POP(ctx); FPU_POP(ctx);
+					}
+					break;
+				case 4: ST(i) = ST(0) - ST(i); FPU_POP(ctx); break;
+				case 5: ST(i) = ST(i) - ST(0); FPU_POP(ctx); break;
+				case 6: ST(i) = ST(0) / ST(i); FPU_POP(ctx); break;
+				case 7: ST(i) = ST(i) / ST(0); FPU_POP(ctx); break;
+			}
+		}
+		// 4. DA: 特殊指令
+		else if (op_group == 0xDA) {
+			if (sub_op == 5 && i == 1) { // DA E9: FUCOMPP
+				UpdateFPUFlags(ctx, ST(0), ST(1));
+				FPU_POP(ctx); FPU_POP(ctx);
+			}
+		}
+		// 5. DB: 控制指令
+		else if (op_group == 0xDB) {
+			if (sub_op == 4) {
+				if (i == 2) { // FCLEX
+					ctx->FPU.SW.Value &= 0x7F00;
+				} else if (i == 3) { // FINIT
+					ctx->FPU.SW.TOP = 0;
+					ctx->FPU.SW.Value = 0;
+					ctx->FPU.SW.Value = 0x037F;
+				}
+			}
+		}
+		// 6. DF: 状态存储
+		else if (op_group == 0xDF && sub_op == 4 && i == 0) {
+			ctx->EAX.I16 = ctx->FPU.SW.Value;
+		}
+		// [新增] 处理 0xD9 组的寄存器指令 (FLD constants, FCHS, FABS 等)
+		else if (op_group == 0xD9) {
+			// sub_op 对应 ModRM.reg, i 对应 ModRM.rm
+			if (sub_op == 4) {
+				switch (i) {
+					case 0: ST(0) = -ST(0); break; // FCHS (Change Sign)
+					case 1: ST(0) = fabs(ST(0)); break; // FABS (Absolute)
+						// case 4: FTST ...
+						// case 5: FXAM ...
+				}
+			} else if (sub_op == 5) {
+				// 加载常数 (Push Constant)
+				switch (i) {
+					case 0: FPU_PUSH(ctx, 1.0); break; // FLD1
+					case 1: FPU_PUSH(ctx, log2(10.0)); break; // FLDL2T
+					case 2: FPU_PUSH(ctx, log2(2.718281828)); break; // FLDL2E
+					case 3: FPU_PUSH(ctx, 3.141592653589793); break; // FLDPI
+					case 4: FPU_PUSH(ctx, log10(2.0)); break; // FLDLG2
+					case 5: FPU_PUSH(ctx, log(2.0)); break; // FLDLN2
+					case 6: FPU_PUSH(ctx, 0.0); break; // FLDZ
+				}
+			}
+			// sub_op 6/7 还有 F2XM1, FSQRT, FSIN 等，暂时可略
+		}
+	}
+}
+

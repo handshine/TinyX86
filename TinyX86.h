@@ -12,6 +12,55 @@ typedef union {
 	}I8;
 }REG32;
 
+// FPU 状态字(Status Word) - 完全位域化
+// 遵循 x86 小端序定义
+typedef union {
+	uint16_t Value; // 整体访问
+	struct {
+		uint16_t IE : 1; // 0: 无效操作异常
+		uint16_t DE : 1; // 1: 非规格化操作数异常
+		uint16_t ZE : 1; // 2: 除零异常
+		uint16_t OE : 1; // 3: 溢出异常
+		uint16_t UE : 1; // 4: 下溢异常
+		uint16_t PE : 1; // 5: 精度异常
+		uint16_t SF : 1; // 6: 栈错误
+		uint16_t ES : 1; // 7: 异常汇总
+		uint16_t C0 : 1; // 8: 条件码 0
+		uint16_t C1 : 1; // 9: 条件码 1
+		uint16_t C2 : 1; // 10: 条件码 2
+		uint16_t TOP : 3; // 11-13: 栈顶指针 (关键！)
+		uint16_t C3 : 1; // 14: 条件码 3
+		uint16_t B : 1;  // 15: FPU 忙
+	};
+} FPU_STATUS_WORD;
+
+// FPU 控制字 (Control Word)
+typedef union {
+	uint16_t Value;
+	struct {
+		uint16_t IM : 1; // 无效操作屏蔽
+		uint16_t DM : 1; // 非规格化屏蔽
+		uint16_t ZM : 1; // 除零屏蔽
+		uint16_t OM : 1; // 溢出屏蔽
+		uint16_t UM : 1; // 下溢屏蔽
+		uint16_t PM : 1; // 精度屏蔽
+		uint16_t Reserved : 2;
+		uint16_t PC : 2; // 精度控制 (00=24bit, 10=53bit, 11=64bit)
+		uint16_t RC : 2; // 舍入控制
+		uint16_t IC : 1; // 无穷控制
+		uint16_t Reserved2 : 3;
+	};
+} FPU_CONTROL_WORD;
+
+typedef struct {
+	// 物理寄存器存储 (模拟 R0-R7)
+	// 尽管 x87 是 80 位扩展精度，但在模拟器中我们用 double (64位) 近似
+	double Regs[8];
+	FPU_STATUS_WORD SW;
+	FPU_CONTROL_WORD CW;
+	uint16_t TW; // Tag Word (暂简化)
+} FPU_Context;
+
 typedef struct {
 	//通用寄存器
 	union {
@@ -61,10 +110,14 @@ typedef struct {
 			WORD GS;
 		};
 	};
-
-	// 新增：CPU 状态标记
-	bool Halted;
+	FPU_Context FPU;// FPU 子系统
+	bool Halted;// 运行控制
 }CPU_Context;
+
+// 核心转换公式：物理索引 = (TOP + i) % 8
+// 注意：TOP 是向下增长的（Push 是减），但在栈内寻址时 ST(1) 是 TOP+1
+#define ST(i) ctx->FPU.Regs[(ctx->FPU.SW.TOP + (i)) & 0x7]
+
 
 int runcpu(CPU_Context* p, int step);
 
@@ -216,3 +269,26 @@ void Exec_SignExtend(CPU_Context* ctx, DecodeContext* d_ctx);
 void Exec_INT(CPU_Context* ctx, DecodeContext* d_ctx);
 // LOOP 指令 (0xE0-E2), 返回0未发生跳转，1发生跳转
 bool Exec_LOOP(CPU_Context* ctx, DecodeContext* d_ctx);
+
+//********************************* Sprint 11 新增: 简单虚拟FPU *********************************************
+//压栈：TOP 减 1，写入数据
+void FPU_PUSH(CPU_Context* ctx, double val);
+// 弹栈：读取数据，TOP 加 1
+double FPU_POP(CPU_Context* ctx);
+//辅助：读取浮点内存
+double MemReadF(uint32_t addr, int size);
+// 辅助：写入浮点内存
+void MemWriteF(uint32_t addr, double val, int size);
+// 更新 FPU 比较标志位(C3, C2, C0) - 直接操作位域
+void UpdateFPUFlags(CPU_Context* ctx, double v1, double v2);
+// SAHF: Store AH into Flags
+void Exec_SAHF(CPU_Context* ctx);
+// SAHF: Load AH from Flags
+void Exec_LAHF(CPU_Context* ctx);
+// 读取整数内存 (int16/int32) -> double (处理 DA/DB/DE/DF)
+double MemReadI(uint32_t addr, int size);
+// 写入整数内存 double -> (int16/int32) (处理 DB/DF)
+void MemWriteI(uint32_t addr, double val, int size);
+
+// ************FPU 指令统一执行器****************
+void Exec_FPU(CPU_Context* ctx, DecodeContext* d_ctx);
