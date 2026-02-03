@@ -11,6 +11,7 @@ int main() {
     // 假设 Base = 0x400000 (模拟 exe 加载基址)
     uint8_t* raw_memory = (uint8_t*)malloc(stack_size);
     if (!raw_memory) return -1;
+    memset(raw_memory, 0, stack_size);
 
     // 为了让地址好看点，我们不动 raw_memory 指针，但在使用 ctx->EIP 时要注意
     // 简单起见，我们假设 host_addr = guest_addr (Host Passthrough)
