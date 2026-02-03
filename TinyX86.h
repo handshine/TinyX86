@@ -126,8 +126,6 @@ int runcpu(CPU_Context* p, int step);
 // 返回 false: 普通指令，调用者需要执行 EIP += instr_len
 bool ExecuteInstruction(CPU_Context* ctx, DecodeContext* d_ctx);
 
-void Exec_NOP(CPU_Context* ctx);
-
 // 辅助函数：根据索引和大小读取通用寄存器
 // ctx: CPU上下文
 // reg_index: 寄存器索引 (0-7)
@@ -186,6 +184,9 @@ void Exec_Group1(CPU_Context* ctx, DecodeContext* d_ctx);
 void Exec_PUSH(CPU_Context* ctx, DecodeContext* d_ctx);
 // POP r32
 void Exec_POP(CPU_Context* ctx, DecodeContext* d_ctx);
+// PUSHA/POPA
+void Exec_PUSHA(CPU_Context* ctx, DecodeContext* d_ctx);
+void Exec_POPA(CPU_Context* ctx, DecodeContext* d_ctx);
 // 检查条件跳转是否成立 (Jcc)
 // condition_code: 指令 Opcode 的低 4 位 (0x70-0x7F 或 0x80-0x8F 的低位),还可以处理类似的逻辑，比如CMOV,SETcc等
 bool CheckCondition(CPU_Context* ctx, uint8_t condition_code);

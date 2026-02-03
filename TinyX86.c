@@ -96,88 +96,16 @@ bool ExecuteInstruction(CPU_Context* ctx, DecodeContext* d_ctx) {
 	}
 
 	// ========================================================
-		// 分支 B: 处理单字节指令
-		// ========================================================
+	// 分支 B: 处理单字节指令
+	// ========================================================
 	switch (d_ctx->opcode) {
-		// --- Sprint 3 新增 ---
-		// Group 1 (立即数运算)
-		case 0x80: case 0x81: case 0x83:
-			Exec_Group1(ctx, d_ctx); break;
-			// 标准 ADD (Gv, Ev 等)
-		case 0x00: case 0x01: case 0x02: case 0x03: case 0x04: case 0x05:
-			Exec_ALU_Generic(ctx, d_ctx, ALU_ADD, false); break;
-			//标准 OR
-		case 0x08: case 0x09: case 0x0A: case 0x0B: case 0x0C: case 0x0D:
-			Exec_ALU_Generic(ctx, d_ctx, ALU_OR, false); break;
-			//标准ADC
-		case 0x10: case 0x11: case 0x12: case 0x13: case 0x14: case 0x15:
-			Exec_ALU_Generic(ctx, d_ctx, ALU_ADC, false); break;
-			//标准SBB
-		case 0x18: case 0x19: case 0x1A: case 0x1B: case 0x1C: case 0x1D:
-			Exec_ALU_Generic(ctx, d_ctx, ALU_SBB, false); break;
-			// 标准 AND
-		case 0x20: case 0x21: case 0x22: case 0x23: case 0x24: case 0x25:
-			Exec_ALU_Generic(ctx, d_ctx, ALU_AND, false); break;
-			// 标准 SUB
-		case 0x28: case 0x29: case 0x2A: case 0x2B: case 0x2C: case 0x2D:
-			Exec_ALU_Generic(ctx, d_ctx, ALU_SUB, false); break;
-			// 标准 CMP
-		case 0x38: case 0x39: case 0x3A: case 0x3B: case 0x3C: case 0x3D:
-			Exec_ALU_Generic(ctx, d_ctx, ALU_CMP, true); break;
-		// --- INC / DEC ---
-		case 0x40: case 0x41: case 0x42: case 0x43: case 0x44: case 0x45: case 0x46: case 0x47:
-			Exec_INC(ctx, d_ctx); break;
-		case 0x48: case 0x49: case 0x4A: case 0x4B: case 0x4C: case 0x4D: case 0x4E: case 0x4F:
-			Exec_DEC(ctx, d_ctx);break;
+		
 
-		// --- PUSH / POP ---
-		case 0x50: case 0x51: case 0x52: case 0x53: case 0x54: case 0x55: case 0x56: case 0x57: // PUSH r32
-		case 0x68: case 0x6A: // PUSH imm
-		case 0x06: case 0x0E: case 0x16: case 0x1E: // PUSH Seg
-			Exec_PUSH(ctx, d_ctx);
-			break;
-		case 0x58: case 0x59: case 0x5A: case 0x5B: case 0x5C: case 0x5D: case 0x5E: case 0x5F: // POP r32
-		case 0x07: case 0x17: // [修复] 补全 POP SS
-		case 0x1F: // POP Seg
-			Exec_POP(ctx, d_ctx);
-			break;
-
-			// --- JMP / CALL / RET ---
-		case 0xE9: // JMP Jz (Near Jump 32)
-		case 0xEB: // JMP Jb (Short Jump 8)
-			jumped = Exec_Branch(ctx, d_ctx, false);
-			break;
-
-		case 0xE8: // CALL Jz
-			jumped = Exec_CALL(ctx, d_ctx);
-			break;
-
-		case 0xC3: // RETN
-		case 0xC2: // RETN Iw
-			jumped = Exec_RET(ctx, d_ctx);
-			break;
-
-			// --- Jcc (条件跳转) ---
-			// 0x70 - 0x7F (Short Jumps)
-		case 0x70: case 0x71: case 0x72: case 0x73:
-		case 0x74: case 0x75: case 0x76: case 0x77:
-		case 0x78: case 0x79: case 0x7A: case 0x7B:
-		case 0x7C: case 0x7D: case 0x7E: case 0x7F:
-			jumped = Exec_Branch(ctx, d_ctx, true);
-			break;
-
-			// 0x0F 8x (Long Jumps) - 属于 Opcode 扩展，注意 disasm 是否处理了 two_byte_opcode
-			// 如果是双字节码，switch(d_ctx->opcode) 可能只拿到了 0x8x (取决于你的 disasm 实现)
-			// 根据你的 disasm.c 逻辑，is_two_byte_opcode 会被设置。
-			// 如果 d_ctx->is_two_byte_opcode 为真，你需要在这里特判或者用两张 switch 表。
-			// Sprint 4 简化起见，先假设我们只处理 0x7x 系列短跳转。
-
-
-		// --- MOV 家族 (完善) ---
-		// 0x88-0x8B: Generic MOV (Gv,Ev / Ev,Gv...) - 之前已存在
-		// 0x8C: MOV Ew, Sw (Segment -> Reg/Mem)
-		// 0x8E: MOV Sw, Ew (Reg/Mem -> Segment)
-		// 因为我们在 Get/SetOperandValue 里实现了 Sw，这里直接复用通用逻辑！
+		// ==========================================
+		// Group A: 数据传送 (Data Transfer)
+		// ==========================================
+		// 
+			// MOV r/m, r (0x88 - 0x8B)
 		case 0x88: case 0x89: case 0x8A: case 0x8B:
 		case 0x8C:          // 新增: MOV r/m, seg
 		case 0x8E:          // 新增: MOV seg, r/m
@@ -212,58 +140,33 @@ bool ExecuteInstruction(CPU_Context* ctx, DecodeContext* d_ctx) {
 		}
 		break;
 
-			//sprint6:字符串操作
-		case 0xA4: case 0xA5: // MOVS
-		case 0xA6: case 0xA7: // CMPS
-		case 0xAA: case 0xAB: // STOS
-		case 0xAC: case 0xAD: // LODS	
-		case 0xAE: case 0xAF: // SCANS
-			if(d_ctx->pfx_rep || d_ctx->pfx_repne) {
-				// 委托给 REP 处理器
-				// 注意：Exec_REP_StringOp 内部会返回 true (保持 EIP) 或 false (推进 EIP)
-				// 这与 jumped 的语义完全一致
-				return Exec_REP_StringOp(ctx, d_ctx);
-			}
-			else
-			{
-				// 没有前缀，执行一次，EIP 正常前进
-				Exec_StringOp(ctx, d_ctx);
-				return false;
-			}
-			break;
-
-			// --- Sprint 5.1: Group 2 (Shift/Rotate) ---
-		case 0xC0: case 0xC1: // Grp2 Eb/Ev, Ib
-		case 0xD0: case 0xD1: // Grp2 Eb/Ev, 1
-		case 0xD2: case 0xD3: // Grp2 Eb/Ev, CL
-			Exec_Group2(ctx, d_ctx); break;
-
-			// --- Sprint 5.2: Group 3 (MUL/DIV/NOT/NEG) ---
-		case 0xF5:
-			ctx->EFLAGS.CF ^= 1; break;// CMC
-		case 0xF6: // Group 3 (Byte)
-		case 0xF7: // Group 3 (Word/Dword)
-			Exec_Group3(ctx, d_ctx);
-			break;
-		case 0xF8:
-			ctx->EFLAGS.CF = 0; break;
-		case 0xF9:
-			ctx->EFLAGS.CF = 0; break;
-		case 0xFA:
-			ctx->EFLAGS.IF = 0; break;
-		case 0xFB:
-			ctx->EFLAGS.IF = 1; break;
-		case 0xFC:
-			ctx->EFLAGS.DF = 0; break;
-		case 0xFD:
-			ctx->EFLAGS.DF = 1; break;
-			//sprint7: EFLAGS操作与enter，leave，lea，xchg
 		case 0x8D: Exec_LEA(ctx, d_ctx); break; // LEA 指令
-			// NOP
 		case 0x90: break; // NOP
 		case 0x86:case 0x87: // XCHG Eb, Gb / Ev, Gv
-		case 0x91:case 0x92: case 0x93: case 0x94: case 0x95:case 0x96:case 0x97: //XCHG
+		case 0x91:case 0x92: case 0x93: case 0x94: case 0x95:case 0x96:case 0x97: // XCHG EAX, reg
 			Exec_XCHG(ctx, d_ctx); break;
+
+			// --- 符号扩展 (0x98, 0x99) ---
+		case 0x98: // CBW / CWDE
+		case 0x99: // CWD / CDQ
+			Exec_SignExtend(ctx, d_ctx); break;
+
+		// ==========================================
+		// Group B: 栈操作 (Stack)
+		// ==========================================
+		// 
+		// --- PUSH / POP ---
+		case 0x50: case 0x51: case 0x52: case 0x53: case 0x54: case 0x55: case 0x56: case 0x57: // PUSH r32
+		case 0x68: case 0x6A: // PUSH imm
+		case 0x06: case 0x0E: case 0x16: case 0x1E: // PUSH Seg
+			Exec_PUSH(ctx, d_ctx);break;
+		case 0x58: case 0x59: case 0x5A: case 0x5B: case 0x5C: case 0x5D: case 0x5E: case 0x5F: // POP r32
+		case 0x07: case 0x17: case 0x1F: // POP Seg
+			Exec_POP(ctx, d_ctx);break;
+		case 0x60:
+			Exec_PUSHA(ctx, d_ctx); break;
+		case 0x61:
+			Exec_POPA(ctx, d_ctx); break;
 		case 0x9C:
 			Exec_PUSHF(ctx); break; // PUSHF
 		case 0x9D:
@@ -272,55 +175,174 @@ bool ExecuteInstruction(CPU_Context* ctx, DecodeContext* d_ctx) {
 			Exec_ENTER(ctx, d_ctx); break; // ENTER
 		case 0xC9:
 			Exec_LEAVE(ctx); break; // LEAVE
-			//sprint8:  FF /2, FF /4 0x0F ... MOVZX, MOVSX SETcc  
+
+		// ==========================================
+		// Group C: 算术运算 (ALU)
+		// ==========================================
+		// 
+		// ADD, OR, ADC, SBB, AND, SUB, XOR, CMP (0x00 - 0x3D
+			// 标准 ADD (Gv, Ev 等)
+		case 0x00: case 0x01: case 0x02: case 0x03: case 0x04: case 0x05:
+			Exec_ALU_Generic(ctx, d_ctx, ALU_ADD, false); break;
+			//标准 OR
+		case 0x08: case 0x09: case 0x0A: case 0x0B: case 0x0C: case 0x0D:
+			Exec_ALU_Generic(ctx, d_ctx, ALU_OR, false); break;
+			//标准ADC
+		case 0x10: case 0x11: case 0x12: case 0x13: case 0x14: case 0x15:
+			Exec_ALU_Generic(ctx, d_ctx, ALU_ADC, false); break;
+			//标准SBB
+		case 0x18: case 0x19: case 0x1A: case 0x1B: case 0x1C: case 0x1D:
+			Exec_ALU_Generic(ctx, d_ctx, ALU_SBB, false); break;
+			// 标准 AND
+		case 0x20: case 0x21: case 0x22: case 0x23: case 0x24: case 0x25:
+			Exec_ALU_Generic(ctx, d_ctx, ALU_AND, false); break;
+			// 标准 SUB
+		case 0x28: case 0x29: case 0x2A: case 0x2B: case 0x2C: case 0x2D:
+			Exec_ALU_Generic(ctx, d_ctx, ALU_SUB, false); break;
+		case 0x30: case 0x31: case 0x32: case 0x33: case 0x34: case 0x35: 
+			Exec_ALU_Generic(ctx, d_ctx, ALU_XOR, false); break;
+			// 标准 CMP
+		case 0x38: case 0x39: case 0x3A: case 0x3B: case 0x3C: case 0x3D:
+			Exec_ALU_Generic(ctx, d_ctx, ALU_CMP, true); break;
+			// Group 1: 0x80-0x83 (Immediate ALU):ADD, OR, ADC, SBB, AND, SUB, XOR, CMP
+		case 0x80: case 0x81: case 0x83:
+			Exec_Group1(ctx, d_ctx); break;
+			// TEST (0x84, 0x85, A8, A9)
+		case 0x84: case 0x85: case 0xA8: case 0xA9:
+			Exec_ALU_Generic(ctx, d_ctx, ALU_AND, true); break;
+			// --- INC / DEC ---
+		case 0x40: case 0x41: case 0x42: case 0x43: case 0x44: case 0x45: case 0x46: case 0x47:
+			Exec_INC(ctx, d_ctx); break;
+		case 0x48: case 0x49: case 0x4A: case 0x4B: case 0x4C: case 0x4D: case 0x4E: case 0x4F:
+			Exec_DEC(ctx, d_ctx);break;
+			// Group 3 (F6/F7): NEG, NOT, MUL, IMUL, DIV, IDIV
+		case 0xF6: case 0xF7:
+			Exec_Group3(ctx, d_ctx); break;
 		case 0xFE:
 			Exec_Group4(ctx, d_ctx); break; // Group 4 (INC/DEC Eb)
-		case 0xFF:
-			jumped = Exec_Group5(ctx, d_ctx); break; // Group 5 (CALL/JMP/PUSH Ev)
-		//sprint9
 
-		// --- TEST (0x84, 0x85,0xA8,0xA9) ---
-		// 0xF6/0xF7 的 TEST 已经在 Group3 处理了，这里处理单独的 opcode
-		case 0x84: case 0x85: case 0xA8: case 0xA9:
-				Exec_ALU_Generic(ctx, d_ctx, ALU_AND,true); break;// true 表示不写回
+		// ==========================================
+		// Group D: 移位操作 (Shift/Rotate)
+		// ==========================================
+		// 
+		// Group 2 (C0, C1, D0, D1, D2, D3)
+		case 0xC0: case 0xC1: // Grp2 Eb/Ev, Ib
+		case 0xD0: case 0xD1: // Grp2 Eb/Ev, 1
+		case 0xD2: case 0xD3: // Grp2 Eb/Ev, CL
+			Exec_Group2(ctx, d_ctx); break;
 
-		// --- 符号扩展 (0x98, 0x99) ---
-		case 0x98: // CBW / CWDE
-		case 0x99: // CWD / CDQ
-			Exec_SignExtend(ctx, d_ctx);break;
-		//sprint10
-		// --- Interrupts ---
-		case 0xCC: // INT 3
-		case 0xCD: // INT Ib
-			Exec_INT(ctx, d_ctx);break;
-		// --- LOOP ---
-		case 0xE0: case 0xE1: case 0xE2: // LOOPxx Jb
-			jumped = Exec_LOOP(ctx, d_ctx);// 这里的 offset 逻辑和 Jcc 类似，Exec_LOOP 内部已处理 EIP
+		// ==========================================
+		// Group E: 串操作 (String)
+		// ==========================================
+		// 
+		case 0xA4: case 0xA5: // MOVS
+		case 0xA6: case 0xA7: // CMPS
+		case 0xAA: case 0xAB: // STOS
+		case 0xAC: case 0xAD: // LODS	
+		case 0xAE: case 0xAF: // SCANS
+			if (d_ctx->pfx_rep || d_ctx->pfx_repne) { return Exec_REP_StringOp(ctx, d_ctx);}
+			else{Exec_StringOp(ctx, d_ctx); return false; }
+
+		// ==========================================
+		// Group F: 控制流 (Control Flow)
+		// ==========================================
+		//	
+		// 	
+			// --- Jcc (条件跳转) ---
+			// 0x70 - 0x7F (Short Jumps)
+		case 0x70: case 0x71: case 0x72: case 0x73:
+		case 0x74: case 0x75: case 0x76: case 0x77:
+		case 0x78: case 0x79: case 0x7A: case 0x7B:
+		case 0x7C: case 0x7D: case 0x7E: case 0x7F:
+			jumped = Exec_Branch(ctx, d_ctx, true);
 			break;
-		// --- JCXZ / JECXZ (0xE3) ---
-		// 既然做了 LOOP，顺便把这个也做了吧，它检测 ECX 是否为 0
+		case 0xE9: // JMP Jz (Near Jump 32)
+		case 0xEB: // JMP Jb (Short Jump 8)
+			jumped = Exec_Branch(ctx, d_ctx, false);
+			break;
+			// --- JCXZ / JECXZ (0xE3) ---
 		case 0xE3:
 			if (ctx->ECX.I32 == 0) {
 				int8_t offset = (int8_t)d_ctx->imm;
 				ctx->EIP += d_ctx->instr_len + offset;
-				jumped =true;
+				jumped = true;
 			}
 			break;
-		//********************************sprint11:FPU******************************************
+		case 0xE8: // CALL Jz
+			jumped = Exec_CALL(ctx, d_ctx);
+			break;
+		case 0xC3: // RETN
+		case 0xC2: // RETN Iw
+			jumped = Exec_RET(ctx, d_ctx);
+			break;
+		case 0xFF:
+			jumped = Exec_Group5(ctx, d_ctx); break; // Group 5 (CALL/JMP/PUSH Ev)
+			// --- LOOP ---
+		case 0xE0: case 0xE1: case 0xE2: // LOOPxx Jb
+			jumped = Exec_LOOP(ctx, d_ctx);
+			break;
+
+		// ==========================================
+		// Group G: 系统与 FPU (System & FPU)
+		// ==========================================
+		case 0xCC: // INT 3
+		case 0xCD: // INT Ib
+			Exec_INT(ctx, d_ctx); break;
+			// FPU (D8 - DF)
 		case 0xD8: case 0xD9: case 0xDA: case 0xDB:
 		case 0xDC: case 0xDD: case 0xDE: case 0xDF:
 			Exec_FPU(ctx, d_ctx);
 			break;
 			// --- SAHF (0x9E) LAHF(0x9F)---
 		case 0x9E:
-			Exec_SAHF(ctx);break;
+			Exec_SAHF(ctx); break;
 		case 0x9F:
-
-
-
-
+			Exec_LAHF(ctx); break;
+		case 0xF5:
+			ctx->EFLAGS.CF ^= 1; break;// CMC
+		case 0xF8:
+			ctx->EFLAGS.CF = 0; break;// CLC
+		case 0xF9:
+			ctx->EFLAGS.CF = 1; break;// STC
+		case 0xFA:
+			ctx->EFLAGS.IF = 0; break;//CLI
+		case 0xFB:
+			ctx->EFLAGS.IF = 1; break;//STI
+		case 0xFC:
+			ctx->EFLAGS.DF = 0; break;//CLD
+		case 0xFD:
+			ctx->EFLAGS.DF = 1; break;//STD
+		case 0xF4: // HLT
+			ctx->Halted = true; break;
+		// ==========================================
+		// Group I: 未实现
+		// =========================================
+		case 0x26: case 0x2E: case 0x36: case 0x3E: // 段超越前缀 (通常在解码层处理)
+		case 0x62: // BOUND
+		case 0x63: // ARPL
+		case 0x64: case 0x65: // FS/GS Prefix
+		case 0x66: case 0x67: // Size Override Prefix
+		case 0x69: case 0x6B: // IMUL3 ( Immediate)
+		case 0x6C: case 0x6D: case 0x6E: case 0x6F: // IN/OUT String
+		case 0x9A: // CALL FAR
+		case 0x9B: // WAIT/FWAIT
+		case 0xC4: case 0xC5: // LES / LDS
+		case 0xCA: case 0xCB: // RETF
+		case 0xCE: // INTO
+		case 0xCF: // IRET
+		case 0xD4: // AAM
+		case 0xD5: // AAD
+		case 0xD6: // SALC (Undocumented)
+		case 0xD7: // XLAT
+		case 0xE4: case 0xE5: case 0xE6: case 0xE7: // IN / OUT (Fixed Port)
+		case 0xEA: // JMP FAR
+		case 0xEC: case 0xED: case 0xEE: case 0xEF: // IN / OUT (DX Port)
+		case 0xF0: // LOCK Prefix
+		case 0xF2: case 0xF3: // REPNE / REP Prefix
+			// 此处记录所有 0x00-0xFF 范围内尚未在上方 Switch 分支中处理的指令
 		default:
-			printf("Unimplemented: 0x%02X\n", d_ctx->opcode);
+			printf("[CPU] Unimplemented Opcode: 0x%02X\n", d_ctx->opcode);
+			ctx->Halted = true; // 遇到非法指令直接停机
 			break;
 	}
 	return jumped;
@@ -739,6 +761,49 @@ void Exec_POP(CPU_Context* ctx, DecodeContext* d_ctx) {
 	ctx->ESP.I32 += size;
 	// 3. 写入目的操作数 (Op1)
 	SetOperandValue(ctx, d_ctx, 0, val);
+}
+
+void Exec_PUSHA(CPU_Context* ctx, DecodeContext* d_ctx) {
+	int size = (d_ctx->pfx_op_size == 0x66) ? 2 : 4;
+	uint32_t sp_val = (size == 2) ? (uint32_t)ctx->ESP.I16 : ctx->ESP.I32;
+
+	if (size == 2) {
+		for (int i = 0; i < 8; i++) {
+			ctx->ESP.I32 -= 2;
+			MemWrite(ctx->ESP.I32, ctx->GPR[i].I16, 2);
+		}
+	}
+	else {
+		for (int i = 0; i < 8; i++) {
+			ctx->ESP.I32 -= 4;
+			MemWrite(ctx->ESP.I32, ctx->GPR[i].I32, 4);
+		}
+	}
+}
+
+void Exec_POPA(CPU_Context* ctx, DecodeContext* d_ctx) {
+	int size = (d_ctx->pfx_op_size == 0x66) ? 2 : 4;
+
+	if (size == 2) {
+		ctx->EDI.I16 = (uint16_t)MemRead(ctx->ESP.I32, 2); ctx->ESP.I32 += 2;
+		ctx->ESI.I16 = (uint16_t)MemRead(ctx->ESP.I32, 2); ctx->ESP.I32 += 2;
+		ctx->EBP.I16 = (uint16_t)MemRead(ctx->ESP.I32, 2); ctx->ESP.I32 += 2;
+		ctx->ESP.I32 += 2; // 丢弃 SP
+		ctx->EBX.I16 = (uint16_t)MemRead(ctx->ESP.I32, 2); ctx->ESP.I32 += 2;
+		ctx->EDX.I16 = (uint16_t)MemRead(ctx->ESP.I32, 2); ctx->ESP.I32 += 2;
+		ctx->ECX.I16 = (uint16_t)MemRead(ctx->ESP.I32, 2); ctx->ESP.I32 += 2;
+		ctx->EAX.I16 = (uint16_t)MemRead(ctx->ESP.I32, 2); ctx->ESP.I32 += 2;
+	}
+	else {
+		ctx->EDI.I32 = MemRead(ctx->ESP.I32, 4); ctx->ESP.I32 += 4;
+		ctx->ESI.I32 = MemRead(ctx->ESP.I32, 4); ctx->ESP.I32 += 4;
+		ctx->EBP.I32 = MemRead(ctx->ESP.I32, 4); ctx->ESP.I32 += 4;
+		ctx->ESP.I32 += 4; // 丢弃 ESP
+		ctx->EBX.I32 = MemRead(ctx->ESP.I32, 4); ctx->ESP.I32 += 4;
+		ctx->EDX.I32 = MemRead(ctx->ESP.I32, 4); ctx->ESP.I32 += 4;
+		ctx->ECX.I32 = MemRead(ctx->ESP.I32, 4); ctx->ESP.I32 += 4;
+		ctx->EAX.I32 = MemRead(ctx->ESP.I32, 4); ctx->ESP.I32 += 4;
+	}
 }
 
 // 检查条件跳转是否成立 (Jcc)
