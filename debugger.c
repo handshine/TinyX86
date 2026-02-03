@@ -6,6 +6,8 @@
 #include <ctype.h>
 #include <stdlib.h> 
 
+extern void* g_StackMemory;
+
 // ============================================================================
 // 内部状态与配置
 // ============================================================================
@@ -17,9 +19,9 @@ static int g_BpCount = 0;
 // 内部辅助函数声明
 // ============================================================================
 static void ToUpperStr(char* str);
-static bool IsCallInstruction(DecodeContext* d_ctx);
 static bool IsBreakpoint(uint32_t eip);
 static bool IsSoftwareBreakpoint(uint32_t eip);
+static bool IsStepOverCandidate(DecodeContext* d_ctx);
 
 // 命令处理函数 (Handlers)
 static void Cmd_StepInto(CPU_Context* ctx, const char* args);
@@ -32,7 +34,9 @@ static void Cmd_ShowRegs(CPU_Context* ctx);
 static void Cmd_Disasm(CPU_Context* ctx, const char* args);
 static void Cmd_MemDump(const char* args);
 static void Cmd_MemEdit(const char* args);
+static void Cmd_MemWriteVal(const char* args, int byte_width);
 static void Cmd_RegWrite(CPU_Context* ctx, const char* args);
+static void Cmd_StackDump(CPU_Context* ctx, const char* args);
 static void PrintHelp();
 
 // ============================================================================
@@ -95,8 +99,13 @@ void Debugger(CPU_Context* ctx) {
             case 'm': // Memory Dump
                 Cmd_MemDump(args);
                 break;
+            case 'k':
+                Cmd_StackDump(ctx, args);
+                break;
             case 'e': // Edit Memory
-                Cmd_MemEdit(args);
+                if (strncmp(args, "d", 1) == 0) Cmd_MemWriteVal(args + 1, 4);      // ed <addr> <val>
+                else if (strncmp(args, "w", 1) == 0) Cmd_MemWriteVal(args + 1, 2); // ew <addr> <val>
+                else Cmd_MemEdit(args); // 原有的字节流写入 e <addr> <b1> <b2>...
                 break;
             case 'w': // Write Register
                 Cmd_RegWrite(ctx, args);
@@ -126,7 +135,7 @@ static void PrintHelp() {
     printf("\n--- Command Help ---\n");
     printf(" Execution:\n");
     printf("  s [N]     : Step Into (execute N instructions, default 1)\n");
-    printf("  n         : Step Over (skip CALL instructions)\n");
+    printf("  n         : Step Over (skip CALL、LOOP、REP... instructions)\n");
     printf("  c         : Continue (run until breakpoint or halt)\n");
     printf("  q         : Quit debugger (halt CPU)\n");
     printf(" Breakpoints:\n");
@@ -137,9 +146,12 @@ static void PrintHelp() {
     printf("  r         : Show all Registers (GPR, Flags, FPU)\n");
     printf("  u [N]     : Disassemble next N instructions (default 5)\n");
     printf("  m <addr>  : Dump memory at hex address (64 bytes)\n");
+    printf("  k [N]     : Dump Stack (show N dwords around ESP, default 8)\n");
     printf(" Modification:\n");
     printf("  w <reg> <val> : Write Register (e.g., w EAX 1234, w ZF 1)\n");
     printf("  e <addr> <val>... : Edit memory bytes (e.g., e 401000 90 CC)\n");
+    printf("  ew <addr> <val>   : Edit memory Word (e.g., ew 401000 1234)\n");
+    printf("  ed <addr> <val>   : Edit memory DWORD (e.g., ed 401000 12345678)\n"); 
 }
 
 static void Cmd_StepInto(CPU_Context* ctx, const char* args) {
@@ -168,23 +180,40 @@ static void Cmd_StepInto(CPU_Context* ctx, const char* args) {
             }
     }
 }
-    static void Cmd_StepOver(CPU_Context * ctx, DecodeContext * d_ctx) {
-    if (IsCallInstruction(d_ctx)) {
+static void Cmd_StepOver(CPU_Context* ctx, DecodeContext* d_ctx) {
+    // 使用新的判断逻辑
+    if (IsStepOverCandidate(d_ctx)) {
+        // 计算"下一步"的目标地址 (即当前指令的下一条指令地址)
+        // 无论是 LOOP 跳回去了，还是 REP 原地打转，只要 EIP 不等于这个地址，就说明还没执行完
         uint32_t target_eip = ctx->EIP + d_ctx->instr_len;
-        printf("[Debugger] Stepping over CALL... (Target: 0x%08X)\n", target_eip);
 
-        int max_steps = 2000000; // 防止无限死循环
+        printf("[Debugger] Stepping over Block/Call... (Target EIP: 0x%08X)\n", target_eip);
+        // 防止无限循环 (比如 jmp $ 或者死循环的 LOOP)，设置一个较大的步数上限
+        int max_steps = 5000000;
+
         while (ctx->EIP != target_eip && !ctx->Halted && max_steps-- > 0) {
+            // --- 拦截机制 ---
+            // 1. 检查中间是否遇到了 INT 3 (软断点)
+            if (IsSoftwareBreakpoint(ctx->EIP)) {
+                printf("\n[Debugger] Hit INT 3 inside StepOver at 0x%08X\n", ctx->EIP);
+                break; // 停止步过，交还控制权
+            }
+            // 执行单步
             runcpu(ctx, 1);
+
+            // 2. 检查中间是否遇到了用户设置的断点 (b <addr>)
             if (IsBreakpoint(ctx->EIP)) {
-                printf("[Debugger] Hit Breakpoint inside CALL at 0x%08X\n", ctx->EIP);
+                printf("\n[Debugger] Hit User Breakpoint inside StepOver at 0x%08X\n", ctx->EIP);
                 break;
             }
         }
-        if (max_steps <= 0) printf("[Warn] StepOver timeout.\n");
+        if (max_steps <= 0) {
+            printf("[Warn] StepOver timeout (Loop too long or infinite?). Stopped.\n");
+        }
+
     } else {
-        // 不是 CALL，普通单步
-        runcpu(ctx, 1);
+        // 如果不是特殊指令，StepOver 等同于 StepInto
+        Cmd_StepInto(ctx, "");
     }
 }
 
@@ -406,14 +435,6 @@ static bool IsBreakpoint(uint32_t eip) {
     return false;
 }
 
-static bool IsCallInstruction(DecodeContext* d_ctx) {
-    // 0xE8: CALL rel, 0x9A: CALL ptr
-    if (d_ctx->opcode == 0xE8 || d_ctx->opcode == 0x9A) return true;
-    // 0xFF /2: CALL r/m
-    if (d_ctx->opcode == 0xFF && d_ctx->reg == 2) return true;
-    return false;
-}
-
 static void ToUpperStr(char* str) {
     for (; *str; ++str) *str = toupper((unsigned char)*str);
 }
@@ -524,4 +545,121 @@ bool SetCpuState(CPU_Context* ctx, const char* name_in, uint32_t val) {
 static bool IsSoftwareBreakpoint(uint32_t eip) {
     uint8_t opcode = MemRead(eip, 1);
     return (opcode == 0xCC);
+}
+
+// ============================================================================
+// [新增] 堆栈查看功能
+// ============================================================================
+static void Cmd_StackDump(CPU_Context* ctx, const char* args) {
+    int count = 8; // 默认显示栈顶以下的 8 个 DWORD
+    if (*args) {
+        int input_cnt = 0;
+        if (sscanf(args, "%d", &input_cnt) == 1 && input_cnt > 0) {
+            count = input_cnt;
+        }
+    }
+    // 我们显示一点点 ESP "上方" (低地址) 的内容，作为上下文 (比如 2 个 DWORD)
+    // 注意：x86 栈是向低地址增长的。
+    // [High Addr] <--- 栈底
+    // ...
+    // [ESP]       <--- 栈顶 (当前数据)
+    // [ESP - 4]   <--- 垃圾数据 / 下一次 PUSH 的位置
+
+    int lines_above = 2;
+    uint32_t esp = ctx->ESP.I32;
+    uint32_t ebp = ctx->EBP.I32;
+
+    printf("Stack Dump (ESP=0x%08X):\n", esp);
+    printf("Address     Value       ASCII   Annotation\n");
+    printf("----------  ----------  -----   ------------------\n");
+
+    for (int i = -lines_above; i < count; i++) {
+        uint32_t addr = esp + (i * 4);
+
+        // ========================================================
+        // 【核心修改】边界检查
+        // ========================================================
+        // 检查 addr 是否落分配的堆栈区间内
+        // 注意：addr 是要读 4 字节，所以 addr+3 也不能越界
+        if (addr < (uint32_t)g_StackMemory || addr + 4 > (uint32_t)g_StackMemory + 1024 * 64) {
+            // 如果越界了，打印一个提示，然后跳过
+            // 这样你就看到了堆栈的尽头，而不是程序崩溃
+            if (i == -lines_above) continue; // 如果是上方越界（还没入栈的地方），直接不显示
+            printf("0x%08X  [Out of Stack Range] \n", addr);
+            break; // 下方越界（栈底之外），直接停止后续打印
+        }
+        uint32_t val = MemRead(addr, 4);
+
+        // 简单的 ASCII 可视化
+        char ascii[5];
+        for (int b = 0; b < 4; b++) {
+            uint8_t byte = (val >> (b * 8)) & 0xFF;
+            ascii[b] = (isprint(byte)) ? byte : '.';
+        }
+        ascii[4] = '\0';
+
+        // 打印地址和十六进制值
+        printf("0x%08X  0x%08X  %s  ", addr, val, ascii);
+
+        // 打印箭头和标记
+        int has_note = 0;
+
+        if (addr == esp) {
+            printf("<--- ESP (Top)");
+            has_note = 1;
+        }
+
+        if (addr == ebp) {
+            printf("%s<--- EBP (Frame)", has_note ? " / " : "");
+            has_note = 1;
+        }
+
+        // 简单的智能分析：如果值看起来像个栈内的指针（指向栈附近）
+        // 这里的判断比较粗糙，仅作为示例
+        if (val > esp && val < esp + 0x1000) {
+            printf("%s(Ptr to Stack?)", has_note ? " " : "");
+        }
+
+        printf("\n");
+    }
+}
+
+// 判断当前指令是否值得 "Step Over" (步过)
+// 包括: CALL, LOOP, REP前缀, INT n
+static bool IsStepOverCandidate(DecodeContext* d_ctx) {
+    uint8_t op = d_ctx->opcode;
+
+    // 1. CALL 系列
+    // 0xE8: CALL rel, 0x9A: CALL ptr
+    if (op == 0xE8 || op == 0x9A) return true;
+    // 0xFF /2: CALL r/m
+    if (op == 0xFF && d_ctx->reg == 2) return true;
+
+    // 2. LOOP 系列 (0xE0 ~ 0xE2)
+    // 0xE0: LOOPNE, 0xE1: LOOPE, 0xE2: LOOP
+    if (op >= 0xE0 && op <= 0xE2) return true;
+
+    // 3. REP 前缀系列 (用于字符串操作 MOVS, STOS, SCAS 等)
+    // 0xF2: REPNE, 0xF3: REP/REPE
+    // 注意: 在反汇编引擎中，F2/F3 被识别为前缀  (通常是这样)，则应该步过
+    if (d_ctx->pfx_rep || d_ctx->pfx_repne) return true;
+
+    // 4. 软中断 (INT n)
+    // 0xCD: INT n (如 INT 21h, INT 80h)
+    // 通常调试时不希望进入中断处理程序，而是直接看结果
+    if (op == 0xCD) return true;
+
+    return false;
+}
+
+static void Cmd_MemWriteVal(const char* args, int byte_width) {
+    uint32_t addr = 0;
+    uint32_t val = 0;
+    // 解析格式: ed 00401000 12345678
+    if (sscanf(args, "%x %x", &addr, &val) == 2) {
+        MemWrite(addr, val, byte_width);
+        printf("Memory Write: [0x%08X] = 0x%X (%d bytes)\n", addr, val, byte_width);
+    } else {
+        printf("Usage: e%c <hex_addr> <hex_value>\n", (byte_width == 4) ? 'd' : 'w');
+    }
 }
