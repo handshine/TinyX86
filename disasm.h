@@ -17,7 +17,6 @@ extern "C" {
 #include <stdbool.h>
 
 
-
 // 操作数类型枚举 
 typedef enum {
     NONE = 0,
@@ -183,20 +182,8 @@ int Disassemble(uint8_t* buffer, uint32_t eip, DecodeContext* out_ctx);
 // reg_size: 寄存器大小 (1=段寄存器, 8, 16, 32)
 // reg_index: 寄存器索引
 const char* GetRegisterName(int reg_size, int reg_index);
-
-// 指令各组件解析
-void ParsePrefixes(DecodeContext* ctx);
-void ParseModRM(DecodeContext* ctx);
-void ParseSIB(DecodeContext* ctx);
-void ParseDisplacement(DecodeContext* ctx);
-void ParseImmediate(DecodeContext* ctx, OperandType type, int imm_index);
-void ParseFPU(DecodeContext* ctx);
 // 主解析函数--返回单次解析指令长度
 int ParseInstuction(uint8_t* buffer, uint32_t eip, DecodeContext* out_ctx);
-
-// 结果格式化
-void FormatOperand(DecodeContext* ctx, char* buf, int size, OperandType type, int* imm_index);
-void FormatModRM(DecodeContext* ctx, char* buf, int size, OperandType type);
 //主格式化打印函数
 void FormatInstruction(uint8_t* buffer, DecodeContext* out_ctx);
 

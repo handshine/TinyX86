@@ -127,11 +127,13 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="debugger.c" />
     <ClCompile Include="disasm.c" />
     <ClCompile Include="main.c" />
     <ClCompile Include="TinyX86.c" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="debugger.h" />
     <ClInclude Include="disasm.h" />
     <ClInclude Include="TinyX86.h" />
   </ItemGroup>

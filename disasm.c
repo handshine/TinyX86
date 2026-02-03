@@ -1,5 +1,16 @@
 #include "disasm.h"
 
+// 指令各组件解析
+static void ParsePrefixes(DecodeContext* ctx);
+static void ParseModRM(DecodeContext* ctx);
+static void ParseSIB(DecodeContext* ctx);
+static void ParseDisplacement(DecodeContext* ctx);
+static void ParseImmediate(DecodeContext* ctx, OperandType type, int imm_index);
+static void ParseFPU(DecodeContext* ctx);
+// 结果格式化
+static void FormatOperand(DecodeContext* ctx, char* buf, int size, OperandType type, int* imm_index);
+static void FormatModRM(DecodeContext* ctx, char* buf, int size, OperandType type);
+
 const GroupEntry group_tables[MAX_GROUPS + 1][MAX_REG_COUNT] = {
     // Group 1 (0x80 /0x81 /0x83)
     [0] = {
@@ -66,12 +77,7 @@ const GroupEntry group_tables[MAX_GROUPS + 1][MAX_REG_COUNT] = {
 	 },
 	 // Group 11 (0xC6 /0xC7)
      [11] = {  {0, "MOV", NONE, NONE, NONE} },
-
-
-
 	// ... 可以继续添加更多 Group 表
-
-
 };
 
 const OpcodeEntry opcode_table[256] = {
@@ -529,7 +535,7 @@ static inline uint32_t ReadDword(DecodeContext* ctx) {
 // 2. 段覆盖前缀 (CS, SS, DS, ES, FS, GS)
 // 3. 操作数大小覆盖 (0x66) - 切换 16/32 位操作数
 // 4. 地址大小覆盖 (0x67) - 切换 16/32 位地址模式
-void ParsePrefixes(DecodeContext* ctx) {
+static void ParsePrefixes(DecodeContext* ctx) {
     bool has_prefix = true;
     while (has_prefix && ctx->pos < ctx->max_len) {
         uint8_t byte = ctx->buffer[ctx->pos];
@@ -552,7 +558,7 @@ void ParsePrefixes(DecodeContext* ctx) {
 // Mod: 寻址模式 (00=内存, 01=内存+disp8, 10=内存+disp32, 11=寄存器)
 // Reg: 寄存器索引 或 Opcode 扩展 (取决于指令)
 // R/M: 寄存器索引 或 内存寻址方式
-void ParseModRM(DecodeContext* ctx) {
+static void ParseModRM(DecodeContext* ctx) {
     ctx->modrm = ReadByte(ctx);
     ctx->mod = (ctx->modrm >> 6) & 0x3;
     ctx->reg = (ctx->modrm >> 3) & 0x7;
@@ -563,7 +569,7 @@ void ParseModRM(DecodeContext* ctx) {
 // SIB 格式: [Scale:2][Index:3][Base:3]
 // 用于复杂的内存寻址: [Base + Index * (2^Scale) + Disp]
 // 仅在 ModR/M 的 R/M 字段为 100 (ESP) 时出现 (32位模式下)
-void ParseSIB(DecodeContext* ctx) {
+static void ParseSIB(DecodeContext* ctx) {
     ctx->sib = ReadByte(ctx);
     ctx->scale = (ctx->sib >> 6) & 0x3;
     ctx->index = (ctx->sib >> 3) & 0x7;
@@ -572,7 +578,7 @@ void ParseSIB(DecodeContext* ctx) {
 }
 
 // 解析位移
-void ParseDisplacement(DecodeContext* ctx) {
+static void ParseDisplacement(DecodeContext* ctx) {
     int addr_size = (ctx->pfx_addr_size == 0x67) ? 16 : 32;
     
     if (addr_size == 32) {
@@ -615,7 +621,7 @@ void ParseDisplacement(DecodeContext* ctx) {
 }
 
 // 解析立即数
-void ParseImmediate(DecodeContext* ctx, OperandType type, int imm_index) {
+static void ParseImmediate(DecodeContext* ctx, OperandType type, int imm_index) {
     int op_size = (ctx->pfx_op_size == 0x66) ? 16 : 32;
     int addr_size = (ctx->pfx_addr_size == 0x67) ? 16 : 32;
     
@@ -694,7 +700,7 @@ void ParseImmediate(DecodeContext* ctx, OperandType type, int imm_index) {
 }
 
 // 格式化 ModR/M 操作数
-void FormatModRM(DecodeContext* ctx, char* buf, int size, OperandType type) {
+static void FormatModRM(DecodeContext* ctx, char* buf, int size, OperandType type) {
     int op_size = (ctx->pfx_op_size == 0x66) ? 16 : 32;
     int addr_size = (ctx->pfx_addr_size == 0x67) ? 16 : 32;
     
@@ -841,7 +847,7 @@ void FormatModRM(DecodeContext* ctx, char* buf, int size, OperandType type) {
 }
 
 // 格式化操作数
-void FormatOperand(DecodeContext* ctx, char* buf, int size, OperandType type, int* imm_index) {
+static void FormatOperand(DecodeContext* ctx, char* buf, int size, OperandType type, int* imm_index) {
     int op_size = (ctx->pfx_op_size == 0x66) ? 16 : 32;
     
     int64_t val = 0;
@@ -998,7 +1004,7 @@ void FormatOperand(DecodeContext* ctx, char* buf, int size, OperandType type, in
     }
 }
 
-void ParseFPU(DecodeContext* ctx) {
+static void ParseFPU(DecodeContext* ctx) {
     uint8_t op = ctx->opcode;
     uint8_t mod = ctx->mod;
     uint8_t reg = ctx->reg;

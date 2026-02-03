@@ -5,6 +5,78 @@
 #include <stdio.h> // 用于printf调试
 #include <math.h> // 需要 math.h 支持 double 运算
 
+// === 执行与调度 ===
+static bool ExecuteInstruction(CPU_Context* ctx, DecodeContext* d_ctx); // 执行指令，返回是否跳转
+
+// === 寄存器/内存与操作数辅助 ===
+static uint32_t ReadGPR(CPU_Context* ctx, int reg_index, int size); // 读取通用寄存器
+static bool WriteGPR(CPU_Context* ctx, int reg_index, int size, uint32_t value); // 写入通用寄存器
+static uint32_t GetEffectiveAddress(CPU_Context* ctx, DecodeContext* d_ctx); // 计算有效地址
+static uint32_t GetOperandValue(CPU_Context* ctx, DecodeContext* d_ctx, int op_idx); // 获取操作数值
+static void SetOperandValue(CPU_Context* ctx, DecodeContext* d_ctx, int op_idx, uint32_t value); // 写入操作数值
+static int GetOperandBitSize(CPU_Context* ctx, DecodeContext* d_ctx, OperandType type); // 获取操作数位宽
+
+// === 标志位与算术逻辑 ===
+static int CalcPF(uint8_t res); // 计算奇偶校验位
+static void UpdateEFLAGS(CPU_Context* ctx, uint32_t res, uint32_t dest, uint32_t src, int size, ALU_Op op); // 更新 EFLAGS
+static void UpdateLogicFlags(CPU_Context* ctx, uint32_t res, int size); // 更新逻辑标志位
+static void Exec_ALU_Generic(CPU_Context* ctx, DecodeContext* d_ctx, ALU_Op op, bool is_compare); // 通用 ALU
+static void Exec_Group1(CPU_Context* ctx, DecodeContext* d_ctx); // Group 1 立即数 ALU
+static void Exec_Group2(CPU_Context* ctx, DecodeContext* d_ctx); // Group 2 移位/旋转
+static uint32_t GetGroup3Source(CPU_Context* ctx, DecodeContext* d_ctx); // Group 3 源操作数
+static void SetGroup3Dest(CPU_Context* ctx, DecodeContext* d_ctx, uint32_t val); // Group 3 写回
+static void Exec_Group3(CPU_Context* ctx, DecodeContext* d_ctx); // Group 3 乘除类
+static void Exec_Group4(CPU_Context* ctx, DecodeContext* d_ctx); // Group 4 INC/DEC
+static bool Exec_Group5(CPU_Context* ctx, DecodeContext* d_ctx); // Group 5 控制/栈
+static void Exec_IMUL_2_Op(CPU_Context* ctx, DecodeContext* d_ctx); // IMUL 双操作数
+static void Exec_INC(CPU_Context* ctx, DecodeContext* d_ctx); // INC
+static void Exec_DEC(CPU_Context* ctx, DecodeContext* d_ctx); // DEC
+
+// === 数据传送与扩展 ===
+static void Exec_MOV_Generic(CPU_Context* ctx, DecodeContext* d_ctx); // MOV r, imm
+static void Exec_MOVZX(CPU_Context* ctx, DecodeContext* d_ctx, int src_bits); // MOVZX 零扩展
+static void Exec_MOVSX(CPU_Context* ctx, DecodeContext* d_ctx, int src_bits); // MOVSX 符号扩展
+static void Exec_SignExtend(CPU_Context* ctx, DecodeContext* d_ctx); // CBW/CWDE/CWD/CDQ
+static void Exec_LEA(CPU_Context* ctx, DecodeContext* d_ctx); // LEA
+static void Exec_XCHG(CPU_Context* ctx, DecodeContext* d_ctx); // XCHG
+
+// === 栈与标志位栈操作 ===
+static void Exec_PUSH(CPU_Context* ctx, DecodeContext* d_ctx); // PUSH
+static void Exec_POP(CPU_Context* ctx, DecodeContext* d_ctx); // POP
+static void Exec_PUSHA(CPU_Context* ctx, DecodeContext* d_ctx); // PUSHA
+static void Exec_POPA(CPU_Context* ctx, DecodeContext* d_ctx); // POPA
+static void Exec_PUSHF(CPU_Context* ctx); // PUSHF
+static void Exec_POPF(CPU_Context* ctx); // POPF
+static void Exec_ENTER(CPU_Context* ctx, DecodeContext* d_ctx); // ENTER
+static void Exec_LEAVE(CPU_Context* ctx); // LEAVE
+static uint32_t PackEFLAGS(CPU_Context* ctx); // 打包 EFLAGS
+static void UnpackEFLAGS(CPU_Context* ctx, uint32_t val); // 解包 EFLAGS
+
+// === 条件/控制流 ===
+static bool CheckCondition(CPU_Context* ctx, uint8_t condition_code); // 检查条件码
+static bool Exec_Branch(CPU_Context* ctx, DecodeContext* d_ctx, bool is_conditional); // 相对跳转
+static bool Exec_CALL(CPU_Context* ctx, DecodeContext* d_ctx); // CALL
+static bool Exec_RET(CPU_Context* ctx, DecodeContext* d_ctx); // RET
+static bool Exec_LOOP(CPU_Context* ctx, DecodeContext* d_ctx); // LOOP
+static void Exec_SETcc(CPU_Context* ctx, DecodeContext* d_ctx); // SETcc
+static void Exec_CMOVcc(CPU_Context* ctx, DecodeContext* d_ctx); // CMOVcc
+static void Exec_INT(CPU_Context* ctx, DecodeContext* d_ctx); // INT
+static void Exec_SAHF(CPU_Context* ctx); // SAHF
+static void Exec_LAHF(CPU_Context* ctx); // LAHF
+
+// === 串操作 ===
+static void Exec_StringOp(CPU_Context* ctx, DecodeContext* d_ctx); // 串操作
+static bool Exec_REP_StringOp(CPU_Context* ctx, DecodeContext* d_ctx); // REP 串操作
+
+// === FPU ===
+static void FPU_PUSH(CPU_Context* ctx, double val); // FPU 压栈
+static double FPU_POP(CPU_Context* ctx); // FPU 弹栈
+static double MemReadF(uint32_t addr, int size); // 读取浮点内存
+static void MemWriteF(uint32_t addr, double val, int size); // 写入浮点内存
+static void UpdateFPUFlags(CPU_Context* ctx, double v1, double v2); // 更新 FPU 比较标志
+static double MemReadI(uint32_t addr, int size); // 读取整数内存为 double
+static void MemWriteI(uint32_t addr, double val, int size); // 写入 double 为整数
+static void Exec_FPU(CPU_Context* ctx, DecodeContext* d_ctx); // FPU 指令执行器
 
 int runcpu(CPU_Context* p, int step)
 {
@@ -31,7 +103,7 @@ int runcpu(CPU_Context* p, int step)
 		// 仅当没有发生跳转时，才推进 EIP
 		if (!jumped) p->EIP += instr_len;
 		// 调试打印 (可选，用于观察 Sprint 1 效果)
-		printf("[Trace] EIP=0x%08X |  %s | Len: %d\n", p->EIP, d_ctx.asm_str, instr_len);
+		//printf("[Trace] EIP=0x%08X |  %s | Len: %d\n", p->EIP, d_ctx.asm_str, instr_len);
 
 	}
 	return 0;
@@ -39,7 +111,7 @@ int runcpu(CPU_Context* p, int step)
 
 
 // 执行分发器
-bool ExecuteInstruction(CPU_Context* ctx, DecodeContext* d_ctx) {
+static bool ExecuteInstruction(CPU_Context* ctx, DecodeContext* d_ctx) {
 	// 默认不跳转
 	bool jumped = false;
 
@@ -347,8 +419,11 @@ bool ExecuteInstruction(CPU_Context* ctx, DecodeContext* d_ctx) {
 	}
 	return jumped;
 }
-
-uint32_t ReadGPR(CPU_Context* ctx, int reg_index, int size) {
+// 辅助函数：根据索引和大小读取通用寄存器
+// ctx: CPU上下文
+// reg_index: 寄存器索引 (0-7)
+// size: 大小 (8, 16, 32)
+static uint32_t ReadGPR(CPU_Context* ctx, int reg_index, int size) {
 	if(reg_index<0 || reg_index>=8) return 0;
 
 	if (size == 32) {
@@ -364,8 +439,9 @@ uint32_t ReadGPR(CPU_Context* ctx, int reg_index, int size) {
 	}
 	return 0;
 }
-
-bool WriteGPR(CPU_Context* ctx, int reg_index, int size, uint32_t value) {
+// 辅助函数：写入通用寄存器
+//0执行报错，1成功
+static bool WriteGPR(CPU_Context* ctx, int reg_index, int size, uint32_t value) {
 	if (reg_index < 0 || reg_index >= 8) return 0;
 
 	if (size == 32) {
@@ -385,7 +461,7 @@ bool WriteGPR(CPU_Context* ctx, int reg_index, int size, uint32_t value) {
 	return 1;
 }
 
-uint32_t GetEffectiveAddress(CPU_Context* ctx, DecodeContext* d_ctx) {
+static uint32_t GetEffectiveAddress(CPU_Context* ctx, DecodeContext* d_ctx) {
 	uint32_t base = 0;
 	uint32_t index = 0;
 	// 1. 处理 SIB 逻辑
@@ -410,7 +486,7 @@ uint32_t GetEffectiveAddress(CPU_Context* ctx, DecodeContext* d_ctx) {
 }
 
 //参照FormatOperand对应修改
-uint32_t GetOperandValue(CPU_Context* ctx, DecodeContext* d_ctx, int op_idx) {
+static uint32_t GetOperandValue(CPU_Context* ctx, DecodeContext* d_ctx, int op_idx) {
 	OperandType type;
 	// 根据索引获取类型
 	if(op_idx == 0) type = d_ctx->entry.op1;
@@ -488,7 +564,7 @@ uint32_t GetOperandValue(CPU_Context* ctx, DecodeContext* d_ctx, int op_idx) {
 
 //参照FormatOperand对应修改
 // 写入操作数的值
-void SetOperandValue(CPU_Context* ctx, DecodeContext* d_ctx, int op_idx, uint32_t value) {
+static void SetOperandValue(CPU_Context* ctx, DecodeContext* d_ctx, int op_idx, uint32_t value) {
 	OperandType type = (op_idx == 0) ? d_ctx->entry.op1 : d_ctx->entry.op2;
 	int op_size = (d_ctx->pfx_op_size == 0x66) ? 16 : 32;
 	switch (type) {
@@ -546,31 +622,14 @@ void SetOperandValue(CPU_Context* ctx, DecodeContext* d_ctx, int op_idx, uint32_
 }
 
 // 处理 MOV r, i (0xB0 - 0xBF)
-void Exec_MOV_Generic(CPU_Context* ctx, DecodeContext* d_ctx) {
+static void Exec_MOV_Generic(CPU_Context* ctx, DecodeContext* d_ctx) {
 	// 1. 读取源操作数 (OP2: Immediate)
 	uint32_t src = GetOperandValue(ctx, d_ctx, 1);
 	// 2. 写入目的操作数 (OP1: Register)
-	// 注意：0xB8这类指令，寄存器直接编码在 Opcode 低3位，disasm 引擎会把它处理成 OP_rAX 等类型
-	// 或者通用的 Opcode Table 可能会将其定义为 Gv, Iv。
-	// 检查你的 opcode_table[0xB8] 定义： {"MOV",0, 0, OP_rAX, Iv, NONE, NULL}
-	// 这里的 OP_rAX 是硬编码类型，不是 Gv (ModRM)。我们需要在 SetOperandValue 里支持 OP_rAX...OP_rDI
-
-	// 为了简化 Sprint 2，我们假设你只测试 MOV EAX, 0x12345678
-	// 并在 SetOperandValue 里补充对 OP_rAX 的支持：
-
-	// [补充代码到 SetOperandValue]
-	/*
-	case OP_rAX: WriteGPR(ctx, 0, op_size, value); break;
-	case OP_rCX: WriteGPR(ctx, 1, op_size, value); break;
-	// ... 其他 OP_rXX ...
-	*/
-
-	// 如果嫌麻烦，我们先用 0xC7 (MOV r/m32, imm32) 来测试，因为它使用标准的 Ev, Iz
-	// 但 0xB8 最简单。我们还是用 SetOperandValue 通用接口写回：
 	SetOperandValue(ctx, d_ctx, 0, src);
 }
 
-int CalcPF(uint8_t res) {
+static int CalcPF(uint8_t res) {
 	int count = 0;
 	for (int i = 0; i < 8; i++) {
 		if(res & (1 << i)) count++;
@@ -578,7 +637,7 @@ int CalcPF(uint8_t res) {
 	return (count % 2 == 0) ? 1 : 0;
 }
 
-void UpdateEFLAGS(CPU_Context* ctx, uint32_t res, uint32_t dest, uint32_t src, int size, ALU_Op op) {
+static void UpdateEFLAGS(CPU_Context* ctx, uint32_t res, uint32_t dest, uint32_t src, int size, ALU_Op op) {
 	// 1. 提取最高位 (Sign Bit) 掩码
 	uint32_t sign_mask = (size == 8) ? 0x80 : (size == 16) ? 0x8000 : 0x80000000;
 	// 截断结果以符合操作数大小
@@ -637,7 +696,7 @@ void UpdateEFLAGS(CPU_Context* ctx, uint32_t res, uint32_t dest, uint32_t src, i
 
 // 辅助函数：获取操作数的实际位宽 (8, 16, 32)
 // 用于确保 ALU 标志位计算正确
-int GetOperandBitSize(CPU_Context* ctx, DecodeContext* d_ctx, OperandType type) {
+static int GetOperandBitSize(CPU_Context* ctx, DecodeContext* d_ctx, OperandType type) {
 	// 1. 获取前缀决定的默认大小 (16 or 32)
 	int def_op_size = (d_ctx->pfx_op_size == 0x66) ? 16 : 32;
 
@@ -669,7 +728,7 @@ int GetOperandBitSize(CPU_Context* ctx, DecodeContext* d_ctx, OperandType type) 
 	}
 }
 
-void Exec_ALU_Generic(CPU_Context* ctx, DecodeContext* d_ctx, ALU_Op op, bool is_compare) {
+static void Exec_ALU_Generic(CPU_Context* ctx, DecodeContext* d_ctx, ALU_Op op, bool is_compare) {
 	// 1. 确定运算位宽 (非常关键！)
 	// 我们根据 Op1 (目的操作数) 的类型来决定运算是 8位 还是 32位
 	// 之前漏掉了 OP_AL 等类型，现在用 GetOperandBitSize 修复
@@ -711,7 +770,7 @@ void Exec_ALU_Generic(CPU_Context* ctx, DecodeContext* d_ctx, ALU_Op op, bool is
 }
 
 // 处理 Group 1 指令 (0x80-0x83: ADD/OR/ADC/SBB/AND/SUB/XOR/CMP immediate)
-void Exec_Group1(CPU_Context* ctx, DecodeContext* d_ctx) {
+static void Exec_Group1(CPU_Context* ctx, DecodeContext* d_ctx) {
 	// Group 1 的指令由 modrm.reg 字段决定操作类型
 	switch (d_ctx->reg) {
 		case 0: Exec_ALU_Generic(ctx, d_ctx, ALU_ADD, false); break;
@@ -726,7 +785,7 @@ void Exec_Group1(CPU_Context* ctx, DecodeContext* d_ctx) {
 }
 
 // PUSH r32 / imm32 / imm8
-void Exec_PUSH(CPU_Context* ctx, DecodeContext* d_ctx) {
+static void Exec_PUSH(CPU_Context* ctx, DecodeContext* d_ctx) {
 	// 1. 读取要压入的值 (Op1)
 	// 注意处理 PUSH ESP 的特殊情况：Intel 规定压入的是执行指令前的 ESP 值
 	// 我们的 GetOperandValue 会读取当前的 ESP，这没问题。
@@ -745,7 +804,7 @@ void Exec_PUSH(CPU_Context* ctx, DecodeContext* d_ctx) {
 	}
 }
 // POP r32
-void Exec_POP(CPU_Context* ctx, DecodeContext* d_ctx) {
+static void Exec_POP(CPU_Context* ctx, DecodeContext* d_ctx) {
 	int size = (d_ctx->pfx_op_size == 0x66) ? 2 : 4;
 	// 1. 从栈顶读取数据
 	uint32_t val = 0;
@@ -763,7 +822,7 @@ void Exec_POP(CPU_Context* ctx, DecodeContext* d_ctx) {
 	SetOperandValue(ctx, d_ctx, 0, val);
 }
 
-void Exec_PUSHA(CPU_Context* ctx, DecodeContext* d_ctx) {
+static void Exec_PUSHA(CPU_Context* ctx, DecodeContext* d_ctx) {
 	int size = (d_ctx->pfx_op_size == 0x66) ? 2 : 4;
 	uint32_t sp_val = (size == 2) ? (uint32_t)ctx->ESP.I16 : ctx->ESP.I32;
 
@@ -781,7 +840,7 @@ void Exec_PUSHA(CPU_Context* ctx, DecodeContext* d_ctx) {
 	}
 }
 
-void Exec_POPA(CPU_Context* ctx, DecodeContext* d_ctx) {
+static void Exec_POPA(CPU_Context* ctx, DecodeContext* d_ctx) {
 	int size = (d_ctx->pfx_op_size == 0x66) ? 2 : 4;
 
 	if (size == 2) {
@@ -808,7 +867,7 @@ void Exec_POPA(CPU_Context* ctx, DecodeContext* d_ctx) {
 
 // 检查条件跳转是否成立 (Jcc)
 // condition_code: 输入指令码，取指令 Opcode 的低 4 位 (0x70-0x7F 或 0x80-0x8F 的低位)，还可以处理类似的逻辑，比如CMOV,SETcc等
-bool CheckCondition(CPU_Context* ctx, uint8_t condition_code) {
+static bool CheckCondition(CPU_Context* ctx, uint8_t condition_code) {
 	switch (condition_code & 0xF) {
 		case 0x0: return ctx->EFLAGS.OF == 1;          // JO
 		case 0x1: return ctx->EFLAGS.OF == 0;          // JNO
@@ -831,7 +890,7 @@ bool CheckCondition(CPU_Context* ctx, uint8_t condition_code) {
 }
 // 处理相对跳转 (JMP, Jcc)
 // 返回 true 表示跳转发生
-bool Exec_Branch(CPU_Context* ctx, DecodeContext* d_ctx, bool is_conditional) {
+static bool Exec_Branch(CPU_Context* ctx, DecodeContext* d_ctx, bool is_conditional) {
 	bool take_jump = true;
 	if (is_conditional) {
 		// 如果是条件跳转，先检查条件
@@ -849,7 +908,7 @@ bool Exec_Branch(CPU_Context* ctx, DecodeContext* d_ctx, bool is_conditional) {
 }
 
 // 处理 CALL (相对调用)
-bool Exec_CALL(CPU_Context* ctx, DecodeContext* d_ctx) {
+static bool Exec_CALL(CPU_Context* ctx, DecodeContext* d_ctx) {
 	// 1. 计算返回地址 (下一条指令)
 	uint32_t ret_addr = ctx->EIP + d_ctx->instr_len;
 	// 2. 压入返回地址 (相当于 PUSH ret_addr)
@@ -863,7 +922,7 @@ bool Exec_CALL(CPU_Context* ctx, DecodeContext* d_ctx) {
 }
 
 // 处理 RET (返回)
-bool Exec_RET(CPU_Context* ctx, DecodeContext* d_ctx) {
+static bool Exec_RET(CPU_Context* ctx, DecodeContext* d_ctx) {
 	// 1. 弹出返回地址 (相当于 POP EIP)
 	uint32_t ret_addr = *(uint32_t*)ctx->ESP.I32;
 	ctx->ESP.I32 += 4;
@@ -876,7 +935,7 @@ bool Exec_RET(CPU_Context* ctx, DecodeContext* d_ctx) {
 	return true;
 }
 
-void Exec_DEC(CPU_Context* ctx, DecodeContext* d_ctx) {
+static void Exec_DEC(CPU_Context* ctx, DecodeContext* d_ctx) {
 	int reg = d_ctx->opcode - 0x48;
 	uint32_t val = ReadGPR(ctx, reg, 32);
 	uint32_t res = val - 1;
@@ -884,7 +943,7 @@ void Exec_DEC(CPU_Context* ctx, DecodeContext* d_ctx) {
 	WriteGPR(ctx, reg, 32, res);
 }
 
-void Exec_INC(CPU_Context* ctx, DecodeContext* d_ctx){
+static void Exec_INC(CPU_Context* ctx, DecodeContext* d_ctx){
 	int reg = d_ctx->opcode - 0x40;
 uint32_t val = ReadGPR(ctx,reg,32);
 	uint32_t res = val + 1;
@@ -893,7 +952,7 @@ uint32_t val = ReadGPR(ctx,reg,32);
 }
 
 // 辅助：仅更新逻辑标志位 (ZF, SF, PF)
-void UpdateLogicFlags(CPU_Context* ctx, uint32_t res, int size) {
+static void UpdateLogicFlags(CPU_Context* ctx, uint32_t res, int size) {
 	uint32_t truncated_res = res;
 	uint32_t sign_mask = 0;
 
@@ -906,7 +965,7 @@ void UpdateLogicFlags(CPU_Context* ctx, uint32_t res, int size) {
 	ctx->EFLAGS.PF = CalcPF(truncated_res);
 }
 //处理Group2指令：SHL, SHR, SAR(移位) 和 ROL, ROR, RCL, RCR(循环移位)。
-void Exec_Group2(CPU_Context* ctx, DecodeContext* d_ctx) {
+static void Exec_Group2(CPU_Context* ctx, DecodeContext* d_ctx) {
 	// 1. 确定位宽
 	int size = GetOperandBitSize(ctx, d_ctx, d_ctx->entry.op1);
 	uint32_t val = GetOperandValue(ctx, d_ctx, 0);// Dest
@@ -1059,7 +1118,7 @@ void Exec_Group2(CPU_Context* ctx, DecodeContext* d_ctx) {
 // F6: MUL AL, Eb -> Op1=AL, Op2=Eb. 所以源操作数是 Op2 (index 1)
 // F6: NOT Eb     -> Op1=Eb.         所以源操作数是 Op1 (index 0)
 // 我们需要根据 reg 字段判断源在哪里
-uint32_t GetGroup3Source(CPU_Context* ctx, DecodeContext* d_ctx) {
+static uint32_t GetGroup3Source(CPU_Context* ctx, DecodeContext* d_ctx) {
 	// reg 0(TEST), 2(NOT), 3(NEG): 单操作数或立即数，源在 Op1 或 Op2(TEST)
 	// reg 4(MUL), 5(IMUL), 6(DIV), 7(IDIV): disasm 表定义了 Op1=Acc, Op2=Src. 所以源在 Op2
 	if (d_ctx->reg >= 4) {
@@ -1069,12 +1128,12 @@ uint32_t GetGroup3Source(CPU_Context* ctx, DecodeContext* d_ctx) {
 }
 
 // 写入 Group 3 结果
-void SetGroup3Dest(CPU_Context* ctx, DecodeContext* d_ctx, uint32_t val) {
+static void SetGroup3Dest(CPU_Context* ctx, DecodeContext* d_ctx, uint32_t val) {
 	SetOperandValue(ctx, d_ctx, 0, val);
 }
 
 // 处理 Group 3 指令 (F6/F7: TEST/NOT/NEG/MUL/IMUL/DIV/IDIV)
-void Exec_Group3(CPU_Context* ctx, DecodeContext* d_ctx) {
+static void Exec_Group3(CPU_Context* ctx, DecodeContext* d_ctx) {
 	int size = GetOperandBitSize(ctx, d_ctx, d_ctx->entry.op1);
 	// 注意：对于 MUL/DIV，Op1 是 AL/AX/EAX，Op2 是 r/m。
 	// 我们主要关心 r/m 的大小，但在 disasm 表里 Op1 已经反映了正确的大小 (AL=8, EAX=32)
@@ -1286,7 +1345,7 @@ void MemWrite(uint32_t addr, uint32_t val, int byte_len) {
 }
 
 
-void Exec_StringOp(CPU_Context* ctx, DecodeContext* d_ctx) {
+static void Exec_StringOp(CPU_Context* ctx, DecodeContext* d_ctx) {
 	// 1. 确定宽度
 	int bit_sz = (d_ctx->opcode & 1) ? ((d_ctx->pfx_op_size == 0x66) ? 16 : 32) : 8;
 	int byte_len = bit_sz / 8;
@@ -1345,7 +1404,7 @@ void Exec_StringOp(CPU_Context* ctx, DecodeContext* d_ctx) {
 	}
 }
 
-bool Exec_REP_StringOp(CPU_Context* ctx, DecodeContext* d_ctx) {
+static bool Exec_REP_StringOp(CPU_Context* ctx, DecodeContext* d_ctx) {
 	// 1. 初始检查：如果 ECX 已经到 0，循环彻底结束
 	if(ctx->ECX.I32 == 0) return false;
 	// 2. 执行单次操作
@@ -1369,7 +1428,7 @@ bool Exec_REP_StringOp(CPU_Context* ctx, DecodeContext* d_ctx) {
 	return should_continue;
 }
 
-void Exec_LEA(CPU_Context* ctx, DecodeContext* d_ctx) {
+static void Exec_LEA(CPU_Context* ctx, DecodeContext* d_ctx) {
 	// 1. 计算有效地址 (Effective Address)
 	// 这里的核心是复用 GetEffectiveAddress，但坚决不要调用 MemRead！
 	uint32_t addr = GetEffectiveAddress(ctx, d_ctx);
@@ -1379,7 +1438,7 @@ void Exec_LEA(CPU_Context* ctx, DecodeContext* d_ctx) {
 	// 注意：LEA 不改变任何标志位 (EFLAGS)
 }
 
-void Exec_XCHG(CPU_Context* ctx, DecodeContext* d_ctx) {
+static void Exec_XCHG(CPU_Context* ctx, DecodeContext* d_ctx) {
 	uint32_t op1= GetOperandValue(ctx, d_ctx, 0);
 	uint32_t op2 = GetOperandValue(ctx, d_ctx, 1);
 	SetOperandValue(ctx, d_ctx, 1, op1);
@@ -1387,7 +1446,7 @@ void Exec_XCHG(CPU_Context* ctx, DecodeContext* d_ctx) {
 }
 
 // 辅助：将 EFLAGS 结构体打包成 32位 整数
-uint32_t PackEFLAGS(CPU_Context* ctx)
+static uint32_t PackEFLAGS(CPU_Context* ctx)
 {
 	// 简单粗暴法：利用 union 的共用体特性 (假设是小端序)
 	// 但为了严谨，x86 规定 Bit 1 永远是 1，Bit 3,5,15 永远是 0
@@ -1398,7 +1457,7 @@ uint32_t PackEFLAGS(CPU_Context* ctx)
 }
 
 // 辅助：从 32位 整数解包到 EFLAGS
-void UnpackEFLAGS(CPU_Context* ctx, uint32_t val)
+static void UnpackEFLAGS(CPU_Context* ctx, uint32_t val)
 {
 	// 保留位处理：通常我们不希望用户修改保留位
 	// 但模拟器为了简单，可以直接赋值，只是强行修正固定位
@@ -1407,14 +1466,14 @@ void UnpackEFLAGS(CPU_Context* ctx, uint32_t val)
 }
 
 // PUSHF (0x9C)
-void Exec_PUSHF(CPU_Context* ctx) {
+static void Exec_PUSHF(CPU_Context* ctx) {
 	uint32_t eflags = PackEFLAGS(ctx);
 	// 压栈 (32位)
 	ctx->ESP.I32 -= 4;
 	MemWrite(ctx->ESP.I32, eflags, 4);
 }
 //POPF (0x9D)
-void Exec_POPF(CPU_Context* ctx) {
+static void Exec_POPF(CPU_Context* ctx) {
 	// 弹栈 (32位)
 	uint32_t eflags = MemRead(ctx->ESP.I32, 4);
 	ctx->ESP.I32 += 4;
@@ -1422,14 +1481,14 @@ void Exec_POPF(CPU_Context* ctx) {
 }
 // LEAVE (0xC9): 恢复栈帧
 // 等价于: MOV ESP, EBP; POP EBP;
-void Exec_LEAVE(CPU_Context* ctx) {
+static void Exec_LEAVE(CPU_Context* ctx) {
 	ctx->ESP.I32 = ctx->EBP.I32;
 	ctx->EBP.I32 = MemRead(ctx->ESP.I32, 4);
 	ctx->ESP.I32 += 4;
 }
 // 从解码上下文中获取参数
 // 解码器把第一个立即数(size)放在 imm，第二个(level)放在 imm2
-void Exec_ENTER(CPU_Context* ctx, DecodeContext* d_ctx) {
+static void Exec_ENTER(CPU_Context* ctx, DecodeContext* d_ctx) {
 	// 参数1:分配的栈空间大小 (16位)
 	uint16_t size = (uint16_t)d_ctx->imm;
 	// 参数2:调用层级 (16位)
@@ -1460,7 +1519,7 @@ void Exec_ENTER(CPU_Context* ctx, DecodeContext* d_ctx) {
 }
 
 // 处理 Group 4 (0xFE): 只有 INC Eb / DEC Eb
-void Exec_Group4(CPU_Context* ctx, DecodeContext* d_ctx) {
+static void Exec_Group4(CPU_Context* ctx, DecodeContext* d_ctx) {
 	uint32_t val = GetOperandValue(ctx, d_ctx, 0);
 	switch (d_ctx->reg) {
 		case 0: // INC Eb
@@ -1473,7 +1532,7 @@ void Exec_Group4(CPU_Context* ctx, DecodeContext* d_ctx) {
 }
 
 // 处理 Group 5 (0xFF): INC/DEC/CALL/JMP/PUSH
-bool Exec_Group5(CPU_Context* ctx, DecodeContext* d_ctx) {
+static bool Exec_Group5(CPU_Context* ctx, DecodeContext* d_ctx) {
 	// 获取操作数 (目标地址或要操作的值)
 	// 注意：对于 CALL/JMP，Op1 (Ev) 是存放"目标地址"的容器
 	uint32_t val = GetOperandValue(ctx, d_ctx, 0);
@@ -1515,7 +1574,7 @@ bool Exec_Group5(CPU_Context* ctx, DecodeContext* d_ctx) {
 
 // MOVZX: Zero Extend (零扩展)
 // src_bits: 源操作数位数 (8 或 16)
-void Exec_MOVZX(CPU_Context* ctx, DecodeContext* d_ctx, int src_bits) {
+static void Exec_MOVZX(CPU_Context* ctx, DecodeContext* d_ctx, int src_bits) {
 	uint32_t val = GetOperandValue(ctx, d_ctx, 1); // 源操作数在 Op2
 	// 强制截断高位，确保高位为0
 	if (src_bits == 8) val &= 0xFF;
@@ -1526,7 +1585,7 @@ void Exec_MOVZX(CPU_Context* ctx, DecodeContext* d_ctx, int src_bits) {
 }
 
 // MOVSX: Sign Extend (符号扩展)
-void Exec_MOVSX(CPU_Context* ctx, DecodeContext* d_ctx, int src_bits) {
+static void Exec_MOVSX(CPU_Context* ctx, DecodeContext* d_ctx, int src_bits) {
 	uint32_t val = GetOperandValue(ctx, d_ctx, 1); // 源操作数在 Op2
 	int32_t res = 0;
 	// 符号扩展
@@ -1536,13 +1595,13 @@ void Exec_MOVSX(CPU_Context* ctx, DecodeContext* d_ctx, int src_bits) {
 }
 
 // SETcc Eb
-void Exec_SETcc(CPU_Context* ctx, DecodeContext* d_ctx) {
+static void Exec_SETcc(CPU_Context* ctx, DecodeContext* d_ctx) {
 	  bool match = CheckCondition(ctx, d_ctx->opcode);
 	  // SETcc 只写入 1 个字节 (Eb)
 	  SetOperandValue(ctx, d_ctx, 0, match ? 1 : 0);
 }
 
-void Exec_CMOVcc(CPU_Context* ctx, DecodeContext* d_ctx) {
+static void Exec_CMOVcc(CPU_Context* ctx, DecodeContext* d_ctx) {
 	bool match = CheckCondition(ctx, d_ctx->opcode); //检查条件
 	if (match) {// 条件成立：执行传送
 		uint32_t val = GetOperandValue(ctx, d_ctx, 1); //获取源操作数
@@ -1553,7 +1612,7 @@ void Exec_CMOVcc(CPU_Context* ctx, DecodeContext* d_ctx) {
 
 // IMUL Gv, Ev (0x0F AF)
 // 有符号乘法，双操作数版本：Dest = Dest * Src
-void Exec_IMUL_2_Op(CPU_Context* ctx, DecodeContext* d_ctx) {
+static void Exec_IMUL_2_Op(CPU_Context* ctx, DecodeContext* d_ctx) {
 	// 1. 确定位宽 (16 或 32)
 	int size = (d_ctx->pfx_op_size == 0x66) ? 16 : 32;
 
@@ -1603,7 +1662,7 @@ void Exec_IMUL_2_Op(CPU_Context* ctx, DecodeContext* d_ctx) {
 }
 
 // 处理 0x98 (CBW/CWDE) 和 0x99 (CWD/CDQ)
-void Exec_SignExtend(CPU_Context* ctx, DecodeContext* d_ctx) {
+static void Exec_SignExtend(CPU_Context* ctx, DecodeContext* d_ctx) {
 	int op_size = (d_ctx->pfx_op_size == 0x66) ? 16 : 32;
 
 	if (d_ctx->opcode == 0x98) {
@@ -1632,7 +1691,7 @@ void Exec_SignExtend(CPU_Context* ctx, DecodeContext* d_ctx) {
 
 // 处理 INT n (0xCD) 和 INT 3 (0xCC)
 // 我们将在这里通过 HLE (高层模拟) 拦截系统调用
-void Exec_INT(CPU_Context* ctx, DecodeContext* d_ctx) {
+static void Exec_INT(CPU_Context* ctx, DecodeContext* d_ctx) {
 	uint8_t int_num = 0;
 	// 区分 INT 3 (0xCC) 和 INT n (0xCD imm8)
 	if (d_ctx->opcode == 0xCC) {
@@ -1691,7 +1750,7 @@ void Exec_INT(CPU_Context* ctx, DecodeContext* d_ctx) {
 	}
 }
 
-bool Exec_LOOP(CPU_Context* ctx, DecodeContext* d_ctx) {
+static bool Exec_LOOP(CPU_Context* ctx, DecodeContext* d_ctx) {
 	// 1. 递减计数器 (ECX/CX)
 	// 根据地址大小前缀 (0x67) 判断是使用 ECX 还是 CX
 	bool condition = false;
@@ -1721,18 +1780,18 @@ bool Exec_LOOP(CPU_Context* ctx, DecodeContext* d_ctx) {
 	return false;
 }
 
-void FPU_PUSH(CPU_Context* ctx, double val) {
+static void FPU_PUSH(CPU_Context* ctx, double val) {
 	ctx->FPU.SW.TOP = (ctx->FPU.SW.TOP - 1) & 0x7; // TOP 环绕递减
 	ST(0) = val;
 }
 
-double FPU_POP(CPU_Context* ctx) {
+static double FPU_POP(CPU_Context* ctx) {
 	double val = ST(0);
 	ctx->FPU.SW.TOP = (ctx->FPU.SW.TOP + 1) & 0x7; // TOP 环绕递增
 	return val;
 }
 
-double MemReadF(uint32_t addr, int size) {
+static double MemReadF(uint32_t addr, int size) {
 	if (size == 4) {//float也读成double
 		uint32_t raw =  MemRead(addr, 4);
 		return (double)(*(float*)&raw);
@@ -1745,7 +1804,7 @@ double MemReadF(uint32_t addr, int size) {
 	}
 }
 
-void MemWriteF(uint32_t addr, double val, int size) {
+static void MemWriteF(uint32_t addr, double val, int size) {
 	if (size == 4) {
 		float f = (float)val;
 		uint32_t raw = *(uint32_t*)&f;
@@ -1757,7 +1816,7 @@ void MemWriteF(uint32_t addr, double val, int size) {
 	}
 }
 
-void UpdateFPUFlags(CPU_Context* ctx, double v1, double v2) {
+static void UpdateFPUFlags(CPU_Context* ctx, double v1, double v2) {
 	// 先清空相关标志
 	ctx->FPU.SW.C0 = 0;//CF
 	ctx->FPU.SW.C2 = 0;//非PF- isNaN？
@@ -1776,7 +1835,7 @@ void UpdateFPUFlags(CPU_Context* ctx, double v1, double v2) {
 	}
 }
 
-void Exec_SAHF(CPU_Context* ctx) {
+static void Exec_SAHF(CPU_Context* ctx) {
 	uint8_t ah = ctx->EAX.I8.H;
 	ctx->EFLAGS.SF = (ah >> 7) & 1;
 	ctx->EFLAGS.ZF = (ah >> 6) & 1;
@@ -1785,7 +1844,7 @@ void Exec_SAHF(CPU_Context* ctx) {
 	ctx->EFLAGS.CF = (ah >> 0) & 1;
 }
 
-void Exec_LAHF(CPU_Context* ctx) {
+static void Exec_LAHF(CPU_Context* ctx) {
 	// 初始化为 0x02，确保保留位 Bit 1 为 1
 	uint8_t ah = 0x02;
 	ah |= (ctx->EFLAGS.SF & 1) << 7;
@@ -1797,7 +1856,7 @@ void Exec_LAHF(CPU_Context* ctx) {
 }
 
 // 读取整数内存 (int16/int32) -> double (处理 DA/DB/DE/DF)
-double MemReadI(uint32_t addr, int size) {
+static double MemReadI(uint32_t addr, int size) {
 	uint32_t raw = MemRead(addr, size);
 	if (size == 2) {
 		return (double)(int16_t)raw;    // 强转符号扩展
@@ -1807,7 +1866,7 @@ double MemReadI(uint32_t addr, int size) {
 }
 
 // 写入整数内存 double -> (int16/int32) (处理 DB/DF)
-void MemWriteI(uint32_t addr, double val, int size) {
+static void MemWriteI(uint32_t addr, double val, int size) {
 	// 简单截断取整 (CVTTSD2SI 行为)
 	if (size == 2) {
 		int16_t i16 = (int16_t)val;
@@ -1818,7 +1877,7 @@ void MemWriteI(uint32_t addr, double val, int size) {
 	}
 }
 
-void Exec_FPU(CPU_Context* ctx, DecodeContext* d_ctx) {
+static void Exec_FPU(CPU_Context* ctx, DecodeContext* d_ctx) {
 	uint8_t op_group = d_ctx->opcode;
 	uint8_t sub_op = d_ctx->reg;
 	bool is_mem = d_ctx->mod != 3;
