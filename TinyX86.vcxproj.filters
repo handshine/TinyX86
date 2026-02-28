@@ -24,12 +24,30 @@
     <ClCompile Include="disasm.c">
       <Filter>源文件</Filter>
     </ClCompile>
+    <ClCompile Include="debugger.c">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="PETools.c">
+      <Filter>头文件</Filter>
+    </ClCompile>
+    <ClCompile Include="PELoader.c">
+      <Filter>源文件</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="TinyX86.h">
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="disasm.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="debugger.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="PETools.h">
+      <Filter>源文件</Filter>
+    </ClInclude>
+    <ClInclude Include="PELoader.h">
       <Filter>头文件</Filter>
     </ClInclude>
   </ItemGroup>

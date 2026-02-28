@@ -475,7 +475,7 @@ static uint32_t GetEffectiveAddress(CPU_Context* ctx, DecodeContext* d_ctx) {
 		//否则保持默认为0
 	}// 2. 无 SIB 逻辑
 	else {
-		if (d_ctx->mod == 0 && d_ctx->modrm == 5) {
+		if (d_ctx->mod == 0 && d_ctx->rm == 5) {
 			base = 0; // disp32 直接作为地址
 		}
 		else {
